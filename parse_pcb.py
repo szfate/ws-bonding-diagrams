@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parent
 DEFAULT_PCB = REPO.parent / "chip-on-board-wire-bonded-pcbs" / "run-1" / "1x1-cob" / "1x1-mezzanine.kicad_pcb"
 DEFAULT_OUT = REPO / "tmp" / "cob" / "1x1.json"
 
-PADRING_LIB_ID = "waferspace_default_padring"
+PADRING_LIB_ID = "padring"
 
 GRAPHIC_SYMBOLS = {
     "fp_line": ("line", ("start", "end")),

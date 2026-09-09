@@ -48,7 +48,8 @@ import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
-from matplotlib.patches import Circle, Patch, Polygon, Rectangle
+from matplotlib.patches import Circle, Patch, PathPatch, Polygon, Rectangle
+from matplotlib.path import Path as MplPath
 from PIL import Image
 from pypdf import PdfReader, PdfWriter, PageObject, Transformation
 from pypdf.generic import RectangleObject
@@ -144,12 +145,19 @@ WIRE_COLOR = "#111111"
 FIDUCIAL_COLOR = "#9b1b1b"
 # Factory-facing callouts in English and Chinese (matplotlib falls back
 # per glyph to the first installed CJK family — see cjk_families()).
-FIDUCIAL_NOTE = "ALIGN DIE QR CODE WITH BOARD ROCKET"
-FIDUCIAL_NOTE_ZH = "将芯片二维码与板上火箭对齐"
+# The die QR aligns to the board's rocket logo — except when the padring
+# carries its own copper circle marker next to pad 0 (0.5x1 board, where
+# the rocket sits in the opposite corner by design).
+FIDUCIAL_NOTE_ROCKET = "ALIGN DIE QR CODE WITH BOARD ROCKET"
+FIDUCIAL_NOTE_ROCKET_ZH = "将芯片二维码与板上火箭对齐"
+FIDUCIAL_NOTE_CIRCLE = "ALIGN DIE QR CODE WITH COPPER CIRCLE NEXT TO PAD 0"
+FIDUCIAL_NOTE_CIRCLE_ZH = "将芯片二维码与焊盘0旁的铜圆点对齐"
 QR_LABEL = "die QR"
 QR_LABEL_ZH = "芯片二维码"
 ROCKET_LABEL = "board rocket"
 ROCKET_LABEL_ZH = "板上火箭"
+CIRCLE_LABEL = "copper circle"
+CIRCLE_LABEL_ZH = "铜圆点"
 QR_ZOOM_VIEW_MM = 0.28   # inset view width (plot mm), centred on the QR cell
 QR_ZOOM_W_FRAC = 0.088   # inset width as figure fraction (square on paper)
 
@@ -180,9 +188,10 @@ LANDING_INSET_MIN_MM = 0.03
 def die_pad_mm(pad: dict, die_bb: list[float]) -> tuple[float, float, float, float]:
     """Die display-frame pad → plot-frame mm (cx, cy, w, h).
 
-    Plot frame = padring frame with y flipped to math-up; in that frame
-    display-frame +y maps directly to plot +y (see die_pad_to_pcb_mm in
-    verify_mapping.py for the KiCad-side transform).
+    The die display frame (GDS rotated 180°, QR top-right) maps 1:1
+    onto the board frame: the die is placed 180°-rotated relative to
+    GDS in the cavity, which cancels the y flip into the y-up plot
+    frame (see PAD_MAPPING.md §4 in the sibling repo).
     """
     cx0 = 0.5 * (die_bb[0] + die_bb[2])
     cy0 = 0.5 * (die_bb[1] + die_bb[3])
@@ -325,9 +334,37 @@ def build_pinout_page(design: dict) -> PageObject:
     return page
 
 
+def to_plot(cob: dict, gx: float, gy: float) -> tuple[float, float]:
+    """KiCad board-global mm → plot-frame mm (padring-centred, y up).
+
+    The plot frame is pcbnew's front view: file millimetres translated
+    to the padring origin, y negated to math-up (small file y = board
+    top = plot top). Everything global — edge cuts, pours, traces,
+    vias, silks, the rocket, and the bond pads' gx/gy — goes through
+    here; the padring footprint's own local shapes go through
+    local_to_plot instead.
+    """
+    ox, oy = cob["padring"]["at_mm"]
+    return gx - ox, -(gy - oy)
+
+
+def local_to_plot(cob: dict, lx: float, ly: float) -> tuple[float, float]:
+    """Padring-footprint-local mm → plot frame.
+
+    Forward placement rotation (same matrix as parse_pcb.py's global
+    placement) followed by to_plot — the footprint-local shapes (mask
+    opening) sit in the padring's own frame, which is rotated by
+    rot_deg on the board.
+    """
+    ox, oy = cob["padring"]["at_mm"]
+    r = math.radians(cob["padring"]["rot_deg"])
+    gx = ox + lx * math.cos(r) - ly * math.sin(r)
+    gy = oy + lx * math.sin(r) + ly * math.cos(r)
+    return gx - ox, -(gy - oy)
+
+
 def board_bounds(cob: dict) -> tuple[float, float, float, float]:
     """Board outline extents in plot-frame mm (padring origin, y up)."""
-    ox, oy = cob["padring"]["at_mm"]
     xs, ys = [], []
     for shape in cob["edge_cuts"]:
         if "start" in shape and "end" in shape:
@@ -337,9 +374,9 @@ def board_bounds(cob: dict) -> tuple[float, float, float, float]:
         else:
             continue
         for px, py in pts:
-            xs.append(px - ox)
-            ys.append(py - oy)
-    return min(xs), -max(ys), max(xs), -min(ys)
+            xs.append(to_plot(cob, px, py)[0])
+            ys.append(to_plot(cob, px, py)[1])
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def data_pt_per_mm(ax: plt.Axes) -> float:
@@ -357,7 +394,7 @@ def data_pt_per_mm(ax: plt.Axes) -> float:
 
 
 def _draw_shapes(ax: plt.Axes, shapes: list, style: dict, zorder: float,
-                 ox: float = 0.0, oy: float = 0.0,
+                 cob: dict | None = None,
                  pt_per_mm: float | None = None,
                  outline_only: tuple = ()) -> None:
     """Outline-style graphics (line/rect/poly/circle) in global mm.
@@ -369,32 +406,37 @@ def _draw_shapes(ax: plt.Axes, shapes: list, style: dict, zorder: float,
     always draw as outlines (the fab's serial-number marking box is
     fill=yes in KiCad but is a placeholder frame, not painted silk).
     """
+
+    def pt(p: tuple) -> tuple:
+        return to_plot(cob, *p) if cob else (p[0], -p[1])
+
     for shape in shapes:
         call_style = dict(style)
         if pt_per_mm is not None and shape.get("stroke_mm"):
             call_style["lw"] = max(shape["stroke_mm"] * pt_per_mm, 0.3)
         filled = bool(shape.get("fill")) and shape["type"] not in outline_only
         if shape["type"] == "line" and "start" in shape:
-            (x0, y0), (x1, y1) = shape["start"], shape["end"]
-            ax.plot([x0 - ox, x1 - ox], [-(y0 - oy), -(y1 - oy)], zorder=zorder, **call_style)
+            (x0, y0), (x1, y1) = pt(shape["start"]), pt(shape["end"])
+            ax.plot([x0, x1], [y0, y1], zorder=zorder, **call_style)
         elif shape["type"] == "rect" and "start" in shape:
-            (x0, y0), (x1, y1) = shape["start"], shape["end"]
+            (x0, y0) = pt(shape["start"])
+            (x1, y1) = pt(shape["end"])
             if filled:
                 ax.add_patch(Rectangle(
-                    (min(x0, x1) - ox, -max(y0, y1) + oy), abs(x1 - x0), abs(y1 - y0),
+                    (min(x0, x1), min(y0, y1)), abs(x1 - x0), abs(y1 - y0),
                     facecolor=call_style.pop("color"), edgecolor="none",
                     zorder=zorder, **call_style))
             else:
                 ax.add_patch(Rectangle(
-                    (min(x0, x1) - ox, -max(y0, y1) + oy), abs(x1 - x0), abs(y1 - y0),
+                    (min(x0, x1), min(y0, y1)), abs(x1 - x0), abs(y1 - y0),
                     fill=False, zorder=zorder, **call_style))
         elif shape["type"] == "poly" or "pts" in shape:
             if filled:
-                ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
+                ax.add_patch(Polygon([pt(p) for p in shape["pts"]],
                                      closed=True, facecolor=call_style.pop("color"),
                                      edgecolor="none", zorder=zorder, **call_style))
             else:
-                ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
+                ax.add_patch(Polygon([pt(p) for p in shape["pts"]],
                                      closed=True, fill=False, zorder=zorder, **call_style))
 
 
@@ -408,20 +450,20 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
     Linewidths that carry geometry (traces) must be in data scale, so
     callers set the axes limits first and pass pt_per_mm().
     """
-    ox, oy = cob["padring"]["at_mm"]
     pt_per_mm = data_pt_per_mm(ax)
 
     # Substrate from Edge.Cuts (fill + outline).
     for shape in cob["edge_cuts"]:
         if shape["type"] == "rect" and "start" in shape:
-            (x0, y0), (x1, y1) = shape["start"], shape["end"]
+            (x0, y0) = to_plot(cob, *shape["start"])
+            (x1, y1) = to_plot(cob, *shape["end"])
             ax.add_patch(Rectangle(
-                (min(x0, x1) - ox, -max(y0, y1) + oy),
+                (min(x0, x1), min(y0, y1)),
                 abs(x1 - x0), abs(y1 - y0),
                 facecolor=PCB_STYLE["mask"], edgecolor="#6f7a75",
                 lw=1.2 * fs, zorder=0.5))
         elif "pts" in shape:
-            ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
+            ax.add_patch(Polygon([to_plot(cob, px, py) for px, py in shape["pts"]],
                                  closed=True, facecolor=PCB_STYLE["mask"],
                                  edgecolor="#6f7a75", lw=1.2 * fs, zorder=0.5))
 
@@ -429,19 +471,19 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
     # The padring's GND stitch "pads" (76-81) are plated thru-holes like
     # any via — KiCad models them as circle pads, but they render as
     # holes: barrel + drill, both here and in the exposed-mask pass.
-    # Pad coords are footprint-local (the plot frame); the via loops
-    # subtract the padring origin, so convert to board-global first.
-    stitch_vias = [{"x_mm": p["x_mm"] + ox, "y_mm": p["y_mm"] + oy,
+    # The via loops take board-global coords; parse_pcb already resolved
+    # the padring pads' global placement into gx/gy.
+    stitch_vias = [{"x_mm": p["gx_mm"], "y_mm": p["gy_mm"],
                     "size_mm": p["size_mm"][0], "drill_mm": p.get("drill_mm")}
                    for p in cob["pads"]
                    if p["num"] in EXTRA_PCB_PADS and p["shape"] == "circle"]
     pour_pts = [p["pts"] for p in cob.get("zone_polygons", [])
                 if p["layer"] == "F.Cu"]
     for pts in pour_pts:
-        ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in pts],
+        ax.add_patch(Polygon([to_plot(cob, px, py) for px, py in pts],
                              closed=True, facecolor=PCB_STYLE["pour"],
                              edgecolor="none", zorder=1))
-    f_segs = [(px - ox, -(py - oy))
+    f_segs = [to_plot(cob, px, py)
               for s in cob.get("segments", []) if s["layer"] == "F.Cu"
               for px, py in (s["start"], s["end"])]
     # True-to-scale trace widths: KiCad mm → axes data scale.
@@ -452,51 +494,73 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
         colors=PCB_STYLE["trace"], linewidths=f_widths, capstyle="round",
         zorder=1.2))
     for v in [*cob.get("vias", []), *stitch_vias]:
-        ax.add_patch(Circle((v["x_mm"] - ox, -(v["y_mm"] - oy)), v["size_mm"] / 2,
+        (vx, vy) = to_plot(cob, v["x_mm"], v["y_mm"])
+        ax.add_patch(Circle((vx, vy), v["size_mm"] / 2,
                             facecolor=PCB_STYLE["via"], edgecolor="none", zorder=1.4))
         if v.get("drill_mm"):
-            ax.add_patch(Circle((v["x_mm"] - ox, -(v["y_mm"] - oy)), v["drill_mm"] / 2,
+            ax.add_patch(Circle((vx, vy), v["drill_mm"] / 2,
                                 facecolor=PCB_STYLE["drill"], edgecolor="none",
                                 zorder=1.45))
 
-    # Solder-mask opening (footprint-local = plot frame): exposed board
-    # with the copper beneath re-drawn bright, clipped to the opening.
-    open_rect = None
+    # Solder-mask opening: exposed board with the copper beneath re-drawn
+    # bright, clipped to the opening. The opening shapes are padring-
+    # footprint-local, unlike the global board data around them. Boards
+    # open the cavity in several shapes (1x0.5: inner die rect + beveled
+    # cavity poly) — clip to the union via a compound path.
+    open_polys = []
     for shape in cob["graphics"].get("F.Mask", []):
         if shape["type"] == "rect" and "start" in shape:
-            (x0, y0), (x1, y1) = shape["start"], shape["end"]
-            open_rect = Rectangle(
-                (min(x0, x1), -max(y0, y1)), abs(x1 - x0), abs(y1 - y0),
-                facecolor=PCB_STYLE["bare"], edgecolor=PCB_STYLE["cu"],
-                lw=0.5 * fs, zorder=1.8)
-            ax.add_patch(open_rect)
-    if open_rect is not None:
+            (x0, y0) = local_to_plot(cob, *shape["start"])
+            (x1, y1) = local_to_plot(cob, *shape["end"])
+            open_polys.append([(min(x0, x1), min(y0, y1)),
+                               (max(x0, x1), min(y0, y1)),
+                               (max(x0, x1), max(y0, y1)),
+                               (min(x0, x1), max(y0, y1))])
+        elif shape["type"] == "poly" and shape.get("pts"):
+            open_polys.append([local_to_plot(cob, px, py)
+                               for px, py in shape["pts"]])
+    if open_polys:
+        for poly in open_polys:
+            ax.add_patch(Polygon(poly, closed=True,
+                                 facecolor=PCB_STYLE["bare"],
+                                 edgecolor=PCB_STYLE["cu"], lw=0.5 * fs,
+                                 zorder=1.8))
+        verts, codes = [], []
+        for poly in open_polys:
+            verts.extend(poly)
+            codes.extend([MplPath.MOVETO] + [MplPath.LINETO] * (len(poly) - 1))
+        open_clip = PathPatch(MplPath(verts, codes), facecolor="none",
+                              edgecolor="none", zorder=-1)
+        ax.add_patch(open_clip)
+    else:
+        open_clip = None
+    if open_clip is not None:
         for pts in pour_pts:
-            p = Polygon([(px, -py) for px, py in pts], closed=True,
+            p = Polygon([to_plot(cob, px, py) for px, py in pts], closed=True,
                         facecolor=PCB_STYLE["cu"], edgecolor="none", zorder=2)
             ax.add_patch(p)
-            p.set_clip_path(open_rect)
+            p.set_clip_path(open_clip)
         bright = LineCollection(
             [(f_segs[i], f_segs[i + 1]) for i in range(0, len(f_segs), 2)],
             colors=PCB_STYLE["cu"], linewidths=f_widths, capstyle="round",
             zorder=1.9)  # under the die render (2) — these route beneath it
         ax.add_collection(bright)
-        bright.set_clip_path(open_rect)
+        bright.set_clip_path(open_clip)
         # Vias inside the opening are exposed too (the mask is open
         # there) — the bare-laminate fill above would otherwise hide
         # them. Gold-plated barrel, dark drill, clipped to the opening
         # and still under the die render.
         for v in [*cob.get("vias", []), *stitch_vias]:
-            vx, vy = v["x_mm"] - ox, -(v["y_mm"] - oy)
+            vx, vy = to_plot(cob, v["x_mm"], v["y_mm"])
             barrel = Circle((vx, vy), v["size_mm"] / 2, facecolor=PCB_STYLE["cu"],
                             edgecolor="none", zorder=1.95)
             ax.add_patch(barrel)
-            barrel.set_clip_path(open_rect)
+            barrel.set_clip_path(open_clip)
             if v.get("drill_mm"):
                 drill = Circle((vx, vy), v["drill_mm"] / 2, facecolor=PCB_STYLE["drill"],
                                edgecolor="none", zorder=1.96)
                 ax.add_patch(drill)
-                drill.set_clip_path(open_rect)
+                drill.set_clip_path(open_clip)
 
     # Non-padring footprint copper (e.g. the logo's copper artwork):
     # filled shapes in global board frame, muted under the mask — then
@@ -507,19 +571,36 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
         fill = PCB_STYLE["cu"] if bright else PCB_STYLE["trace"]
         zo = 2.5 if bright else 1.15  # bright copper sits over the mask
         if shape["type"] == "poly" or "pts" in shape:
-            ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
+            ax.add_patch(Polygon([to_plot(cob, px, py) for px, py in shape["pts"]],
                                  closed=True, facecolor=fill, edgecolor="none",
                                  zorder=zo))
         elif shape["type"] == "rect" and "start" in shape:
-            (sx0, sy0), (sx1, sy1) = shape["start"], shape["end"]
-            ax.add_patch(Rectangle((min(sx0, sx1) - ox, -max(sy0, sy1) + oy),
+            (sx0, sy0) = to_plot(cob, *shape["start"])
+            (sx1, sy1) = to_plot(cob, *shape["end"])
+            ax.add_patch(Rectangle((min(sx0, sx1), min(sy0, sy1)),
                                    abs(sx1 - sx0), abs(sy1 - sy0),
                                    facecolor=fill, edgecolor="none", zorder=zo))
         elif shape["type"] == "circle" and "center" in shape:
-            cx, cy = shape["center"]
-            ex, ey = shape["end"]
-            ax.add_patch(Circle((cx - ox, -(cy - oy)), math.hypot(ex - cx, ey - cy),
+            (cx, cy) = to_plot(cob, *shape["center"])
+            (ex, ey) = to_plot(cob, *shape["end"])
+            ax.add_patch(Circle((cx, cy), math.hypot(ex - cx, ey - cy),
                                 facecolor=fill, edgecolor="none", zorder=zo))
+
+    # Padring-footprint copper: the QR-alignment circle next to pad 0
+    # (0.5x1 board) and the corner fiducial squares — footprint-local,
+    # sitting in the open cavity, so drawn as exposed copper.
+    for shape in cob["graphics"].get("F.Cu", []):
+        if shape["type"] == "circle" and "center" in shape:
+            (cx, cy) = local_to_plot(cob, *shape["center"])
+            (ex, ey) = local_to_plot(cob, *shape["end"])
+            ax.add_patch(Circle((cx, cy), math.hypot(ex - cx, ey - cy),
+                                facecolor=PCB_STYLE["cu"], edgecolor="none",
+                                zorder=2.5))
+        elif shape["type"] == "poly" or "pts" in shape:
+            ax.add_patch(Polygon([local_to_plot(cob, px, py)
+                                  for px, py in shape["pts"]],
+                                 closed=True, facecolor=PCB_STYLE["cu"],
+                                 edgecolor="none", zorder=2.5))
 
     # Board silkscreen (pin-1 marker, marking box) — global board frame,
     # unlike the footprint-local graphics above; strokes at their KiCad
@@ -527,19 +608,22 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
     # so it reads as a frame, not painted silk. Eco layers are assembly
     # planning, not bonding info — skipped.
     _draw_shapes(ax, cob["board_graphics"].get("F.SilkS", []),
-                 dict(color=PCB_STYLE["silk"]), zorder=3, ox=ox, oy=oy,
+                 dict(color=PCB_STYLE["silk"]), zorder=3, cob=cob,
                  pt_per_mm=pt_per_mm, outline_only=("rect",))
 
     # Bond pads: gold ENIG ring with a class-colored rim, GND extras
     # (paddle) dashed-outlined; the GND stitches (76-81) are thru-holes,
     # drawn with the vias above.
+    frot = cob["padring"]["rot_deg"]
     for pad in cob["pads"]:
-        x, y = pad["x_mm"], pad["y_mm"]
+        x, y = to_plot(cob, pad["gx_mm"], pad["gy_mm"])
         w, h = pad["size_mm"]
         cls = CLASS_COLORS[net_class(pad)]
         if pad["num"] in EXTRA_PCB_PADS and pad["shape"] == "circle":
             continue
-        poly = centered_rect(x, -y, w, h, -pad["rot_deg"])
+        # Drawn rotation: KiCad pad rot is CCW on screen (relative to the
+        # footprint), so the plot-frame angle is footprint + pad rot.
+        poly = centered_rect(x, y, w, h, (frot + pad["rot_deg"]) % 360)
         if pad["num"] in EXTRA_PCB_PADS:
             poly.set_facecolor("none")
             poly.set_edgecolor(PCB_STYLE["pad"])
@@ -554,7 +638,7 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
         if show_numbers and pad["num"] not in EXTRA_PCB_PADS:
             # Diagram numbering matches the die (0-based); physical PCB
             # pads are +1 (see the page footer note).
-            ax.annotate(str(int(pad["num"]) - 1), (x, -y), fontsize=4.2 * fs,
+            ax.annotate(str(int(pad["num"]) - 1), (x, y), fontsize=4.2 * fs,
                         ha="center", va="center", color=PCB_STYLE["pad_num"],
                         zorder=7)
 
@@ -619,15 +703,15 @@ def board_rocket_mm(cob: dict) -> tuple[float, float, float] | None:
     (the F.SilkS rect is the fab's serial-number marking box, excluded
     the same way _draw_shapes' outline_only excludes it).
     """
-    ox, oy = cob["padring"]["at_mm"]
     xs, ys = [], []
     for lay in ("F.SilkS", "F.Cu"):
         for s in cob["board_graphics"].get(lay, []):
             if s.get("type") != "poly" or "pts" not in s:
                 continue
             for px, py in s["pts"]:
-                xs.append(px - ox)
-                ys.append(-(py - oy))
+                X, Y = to_plot(cob, px, py)
+                xs.append(X)
+                ys.append(Y)
     if not xs:
         return None
     cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
@@ -635,25 +719,52 @@ def board_rocket_mm(cob: dict) -> tuple[float, float, float] | None:
     return cx, cy, r
 
 
-def draw_fiducials(ax: plt.Axes, cob: dict, fs: float, y_top: float) -> None:
-    """Placement-page fiducials: ring the board's rocket logo and label
-    it above the board (the die's QR cell gets the box + zoom inset of
-    draw_qr_zoom, so the header note reads as QR box ↔ rocket ring).
+def qr_fiducial_target(cob: dict) -> dict | None:
+    """What the die QR aligns to on this board, plot-frame mm + callout text.
+
+    The padring footprint's own F.Cu circle is the QR-alignment marker
+    next to pad 0 (0.5x1 board — its rocket sits in the opposite corner
+    by design). Boards without one align to the rocket logo.
     """
+    for s in cob["graphics"].get("F.Cu", []):
+        if s.get("type") == "circle" and "center" in s:
+            cx, cy = local_to_plot(cob, *s["center"])
+            ex, ey = local_to_plot(cob, *s["end"])
+            return {"cx": cx, "cy": cy, "r": math.hypot(ex - cx, ey - cy) + 0.25,
+                    "note": FIDUCIAL_NOTE_CIRCLE, "note_zh": FIDUCIAL_NOTE_CIRCLE_ZH,
+                    "label": CIRCLE_LABEL, "label_zh": CIRCLE_LABEL_ZH,
+                    "anchor": "left"}
     rocket = board_rocket_mm(cob)
     if rocket is None:
+        return None
+    rx, ry, rr = rocket
+    return {"cx": rx, "cy": ry, "r": rr,
+            "note": FIDUCIAL_NOTE_ROCKET, "note_zh": FIDUCIAL_NOTE_ROCKET_ZH,
+            "label": ROCKET_LABEL, "label_zh": ROCKET_LABEL_ZH}
+
+
+def draw_fiducials(ax: plt.Axes, cob: dict, fs: float, y_top: float,
+                   target: dict | None = None) -> None:
+    """Placement-page fiducials: ring the board's QR-alignment marker and
+    label it above the board (the die's QR cell gets the box + zoom inset
+    of draw_qr_zoom, so the header note reads as QR box ↔ marker ring).
+    The circle marker sits beside the die QR (and the QR inset), so its
+    label anchors right of the leader to stay clear of the inset box.
+    """
+    if target is None:
         print("WARN: no board rocket artwork found — fiducial ring skipped")
         return
-    rx, ry, rr = rocket
+    cx, cy, rr = target["cx"], target["cy"], target["r"]
     lab_y = y_top + 1.45
-    ax.add_patch(Circle((rx, ry), rr, fill=False, edgecolor=FIDUCIAL_COLOR,
+    ax.add_patch(Circle((cx, cy), rr, fill=False, edgecolor=FIDUCIAL_COLOR,
                         lw=1.5 * fs, zorder=8))
-    ax.plot([rx, rx], [ry + rr + 0.06, lab_y - 0.05], color=FIDUCIAL_COLOR,
+    ax.plot([cx, cx], [cy + rr + 0.06, lab_y - 0.05], color=FIDUCIAL_COLOR,
             lw=0.7 * fs, zorder=8)
-    ax.annotate(f"{ROCKET_LABEL} / {ROCKET_LABEL_ZH}", (rx, lab_y),
-                ha="center", va="bottom", fontsize=6.5 * fs,
-                fontweight="bold", color=FIDUCIAL_COLOR, zorder=8,
-                fontfamily=["DejaVu Sans", *CJK_FAMILIES])
+    ax.annotate(f"{target['label']} / {target['label_zh']}",
+                (cx + 0.12 if target.get("anchor") == "left" else cx, lab_y),
+                ha=target.get("anchor", "center"), va="bottom",
+                fontsize=6.5 * fs, fontweight="bold", color=FIDUCIAL_COLOR,
+                zorder=8, fontfamily=["DejaVu Sans", *CJK_FAMILIES])
 
 
 def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
@@ -716,6 +827,7 @@ def wire_segments(design: dict, cob: dict):
     single color — class-colored wires blended into the die/PCB palette.
     """
     die_bb = design["die_bb_um"]
+    frot = cob["padring"]["rot_deg"]
     die_pads = {p["n"]: p for p in design["pads"]}
     ring = sorted((p for p in cob["pads"] if p["num"] not in EXTRA_PCB_PADS),
                   key=lambda p: int(p["num"]))
@@ -726,7 +838,7 @@ def wire_segments(design: dict, cob: dict):
         if dp is None:
             continue
         cx, cy, w, h = die_pad_mm(dp, die_bb)
-        px, py = pcb["x_mm"], -pcb["y_mm"]
+        px, py = to_plot(cob, pcb["gx_mm"], pcb["gy_mm"])
 
         # Start where the center-to-center ray exits the die pad rectangle.
         dx, dy = px - cx, py - cy
@@ -740,12 +852,17 @@ def wire_segments(design: dict, cob: dict):
         # the toward-die-center direction. (A ray-exit test picks the
         # side edge for corner pads, where the toward-die direction is
         # diagonal, scattering the landings mid-pad.)
-        rr = math.radians(pcb["rot_deg"])
+        # Pads are drawn at (frot + pad rot) CCW in the plot frame; the
+        # landing math wants rr = −(drawn rot): stage 1 rotates the
+        # toward-die direction into the pad's local frame with R(rr),
+        # stage 2 rotates the landing point back with R(−rr). Invariant
+        # under rr → rr + 180 (pad-frame half-turn cancels), so the sign
+        # convention of the stored KiCad rot only shifts phase by 180°.
+        rr = math.radians(-(frot + pcb["rot_deg"]))
         dist_c = math.hypot(px, py)
         if dist_c:
             nx, ny = -px / dist_c, -py / dist_c
-            # Pad rects are drawn at -rot (KiCad y-down → plot CCW);
-            # express the toward-die direction in the pad's local frame.
+            # Express the toward-die direction in the pad's local frame.
             lx = nx * math.cos(rr) - ny * math.sin(rr)
             ly = nx * math.sin(rr) + ny * math.cos(rr)
             pw, ph = pcb["size_mm"]
@@ -836,22 +953,28 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     ax.set_axis_off()
 
     name, slot = design["name"], design["slot_size"]
+    # Source PCB, for traceability — page 1 comes from the GDS, pages 2-3
+    # from this board file.
+    pcb_file = Path(cob["source"]).name
     if bonding:
         add_header(fig, "bonding diagram",
-                   f"{name} · slot {slot} · {len(segments)} wires, "
+                   f"{name} · slot {slot} · {pcb_file} · {len(segments)} wires, "
                    f"length {min(lengths):.2f}–{max(lengths):.2f} mm")
         page_num = 3
     else:
         add_header(fig, "die placement on PCB",
-                   f"{name} · slot {slot} · "
+                   f"{name} · slot {slot} · {pcb_file} · "
                    f"die {design['die_w_um']:.0f}×{design['die_h_um']:.0f} µm")
         # Orientation note in the band between the header rule and the
         # diagram, echoing the fiducial rings drawn below.
+        target = qr_fiducial_target(cob)
+        note, note_zh = (target["note"], target["note_zh"]) if target \
+            else (FIDUCIAL_NOTE_ROCKET, FIDUCIAL_NOTE_ROCKET_ZH)
         fig.text(0.5, (HEADER_RULE_Y + (AXES_RECT[1] + AXES_RECT[3])) / 2,
-                 f"{FIDUCIAL_NOTE} / {FIDUCIAL_NOTE_ZH}", ha="center",
+                 f"{note} / {note_zh}", ha="center",
                  va="center", fontsize=8.5, fontweight="bold",
                  color=FIDUCIAL_COLOR, fontfamily=["DejaVu Sans", *CJK_FAMILIES])
-        draw_fiducials(ax, cob, fs, y1)
+        draw_fiducials(ax, cob, fs, y1, target)
         draw_qr_zoom(fig, ax, design, fs, img, y1)
         page_num = 2
     add_footer(fig, page_num)
@@ -906,10 +1029,27 @@ def main() -> None:
         raise SystemExit("no matching designs in tmp/pads.json — run extract_dies.py first")
 
     ring = [p for p in cob["pads"] if p["num"] not in EXTRA_PCB_PADS]
+    # Die must physically fit the board's die site: the smallest F.Mask
+    # opening rect is the cavity the die drops into. Pad count alone
+    # can't catch the wrong board — the 1x0.5 and 0.5x1 rings both have
+    # 72 pads; only the cavity shape differs (wide vs tall).
+    cavity = None
+    for s in cob["graphics"].get("F.Mask", []):
+        if s["type"] == "rect" and "start" in s:
+            w = abs(s["end"][0] - s["start"][0])
+            h = abs(s["end"][1] - s["start"][1])
+            if cavity is None or w * h < cavity[0] * cavity[1]:
+                cavity = (w, h)
     for design in designs:
         if len(design["pads"]) != len(ring):
             print(f"SKIP {design['name']}: pad count mismatch "
                   f"(die {len(design['pads'])} vs COB {len(ring)})")
+            continue
+        dw, dh = design["die_w_um"] / 1000.0, design["die_h_um"] / 1000.0
+        if cavity and (dw > cavity[0] + 0.2 or dh > cavity[1] + 0.2):
+            print(f"SKIP {design['name']}: slot {design['slot_size']} die "
+                  f"{dw:.2f}×{dh:.2f} mm does not fit die site "
+                  f"{cavity[0]:.2f}×{cavity[1]:.2f} mm — wrong board")
             continue
         out = render_design(design, cob)
         print(f"wrote {out}")
