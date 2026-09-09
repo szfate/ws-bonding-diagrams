@@ -297,6 +297,29 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
     _draw_shapes(ax, cob["graphics"].get("Dwgs.User", []),
                  dict(color="#cccccc", lw=0.4 * fs), zorder=3)
 
+    # Non-padring footprint copper (e.g. the logo's copper artwork):
+    # filled shapes in global board frame, muted under the mask — then
+    # redrawn bright where the same shape opens the mask (KiCad 8 puts
+    # `(layers "F.Cu" "F.Mask")` on one poly = exposed copper).
+    for shape in cob["board_graphics"].get("F.Cu", []):
+        bright = "F.Mask" in shape.get("layers", ())
+        fill = PCB_STYLE["cu"] if bright else PCB_STYLE["trace"]
+        zo = 2.5 if bright else 1.15  # bright copper sits over the mask
+        if shape["type"] == "poly" or "pts" in shape:
+            ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
+                                 closed=True, facecolor=fill, edgecolor="none",
+                                 zorder=zo))
+        elif shape["type"] == "rect" and "start" in shape:
+            (sx0, sy0), (sx1, sy1) = shape["start"], shape["end"]
+            ax.add_patch(Rectangle((min(sx0, sx1) - ox, -max(sy0, sy1) + oy),
+                                   abs(sx1 - sx0), abs(sy1 - sy0),
+                                   facecolor=fill, edgecolor="none", zorder=zo))
+        elif shape["type"] == "circle" and "center" in shape:
+            cx, cy = shape["center"]
+            ex, ey = shape["end"]
+            ax.add_patch(Circle((cx - ox, -(cy - oy)), math.hypot(ex - cx, ey - cy),
+                                facecolor=fill, edgecolor="none", zorder=zo))
+
     # Board silkscreen (pin-1 marker, marking box) — global board frame,
     # unlike the footprint-local graphics above; strokes at their KiCad
     # widths. Eco layers are assembly planning, not bonding info — skipped.

@@ -175,8 +175,18 @@ def parse_graphic(node: list) -> dict | None:
     if sym not in GRAPHIC_SYMBOLS:
         return None
     kind, coord_syms = GRAPHIC_SYMBOLS[sym]
+    # Filled shapes (KiCad 8) carry plural `(layers ...)`; outlines carry
+    # singular `(layer ...)`. Prefer the singular, fall back to the
+    # plural's first entry.
     layer_node = first(node, "layer")
-    out = {"type": kind, "layer": layer_node[1] if layer_node else None}
+    layers_node = first(node, "layers")
+    if layer_node:
+        layer, layers = layer_node[1], [layer_node[1]]
+    elif layers_node:
+        layer, layers = layers_node[1], list(layers_node[1:])
+    else:
+        layer, layers = None, []
+    out = {"type": kind, "layer": layer, "layers": layers}
     if coord_syms is None:  # poly
         pts_node = first(node, "pts")
         out["pts"] = _xy_list(pts_node) if pts_node else []
