@@ -165,6 +165,9 @@ def parse_pad(pad: list) -> dict:
         node = first(pad, sym)
         if node:
             out[key] = node[1]
+    drill = first(pad, "drill")
+    if drill:
+        out["drill_mm"] = float(drill[1])
     if net:
         out["net_num"] = as_float(net[1])
     return out

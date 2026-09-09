@@ -426,6 +426,15 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
                                  edgecolor="#6f7a75", lw=1.2 * fs, zorder=0.5))
 
     # Front copper under the mask: pour islands + traces (muted) + vias.
+    # The padring's GND stitch "pads" (76-81) are plated thru-holes like
+    # any via — KiCad models them as circle pads, but they render as
+    # holes: barrel + drill, both here and in the exposed-mask pass.
+    # Pad coords are footprint-local (the plot frame); the via loops
+    # subtract the padring origin, so convert to board-global first.
+    stitch_vias = [{"x_mm": p["x_mm"] + ox, "y_mm": p["y_mm"] + oy,
+                    "size_mm": p["size_mm"][0], "drill_mm": p.get("drill_mm")}
+                   for p in cob["pads"]
+                   if p["num"] in EXTRA_PCB_PADS and p["shape"] == "circle"]
     pour_pts = [p["pts"] for p in cob.get("zone_polygons", [])
                 if p["layer"] == "F.Cu"]
     for pts in pour_pts:
@@ -442,7 +451,7 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
         [(f_segs[i], f_segs[i + 1]) for i in range(0, len(f_segs), 2)],
         colors=PCB_STYLE["trace"], linewidths=f_widths, capstyle="round",
         zorder=1.2))
-    for v in cob.get("vias", []):
+    for v in [*cob.get("vias", []), *stitch_vias]:
         ax.add_patch(Circle((v["x_mm"] - ox, -(v["y_mm"] - oy)), v["size_mm"] / 2,
                             facecolor=PCB_STYLE["via"], edgecolor="none", zorder=1.4))
         if v.get("drill_mm"):
@@ -477,7 +486,7 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
         # there) — the bare-laminate fill above would otherwise hide
         # them. Gold-plated barrel, dark drill, clipped to the opening
         # and still under the die render.
-        for v in cob.get("vias", []):
+        for v in [*cob.get("vias", []), *stitch_vias]:
             vx, vy = v["x_mm"] - ox, -(v["y_mm"] - oy)
             barrel = Circle((vx, vy), v["size_mm"] / 2, facecolor=PCB_STYLE["cu"],
                             edgecolor="none", zorder=1.95)
@@ -488,10 +497,6 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
                                edgecolor="none", zorder=1.96)
                 ax.add_patch(drill)
                 drill.set_clip_path(open_rect)
-
-    # Die courtyard ticks (faint) over the substrate.
-    _draw_shapes(ax, cob["graphics"].get("Dwgs.User", []),
-                 dict(color="#cccccc", lw=0.4 * fs), zorder=3)
 
     # Non-padring footprint copper (e.g. the logo's copper artwork):
     # filled shapes in global board frame, muted under the mask — then
@@ -526,11 +531,14 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
                  pt_per_mm=pt_per_mm, outline_only=("rect",))
 
     # Bond pads: gold ENIG ring with a class-colored rim, GND extras
-    # (paddle + stitches) dashed-outlined.
+    # (paddle) dashed-outlined; the GND stitches (76-81) are thru-holes,
+    # drawn with the vias above.
     for pad in cob["pads"]:
         x, y = pad["x_mm"], pad["y_mm"]
         w, h = pad["size_mm"]
         cls = CLASS_COLORS[net_class(pad)]
+        if pad["num"] in EXTRA_PCB_PADS and pad["shape"] == "circle":
+            continue
         poly = centered_rect(x, -y, w, h, -pad["rot_deg"])
         if pad["num"] in EXTRA_PCB_PADS:
             poly.set_facecolor("none")
