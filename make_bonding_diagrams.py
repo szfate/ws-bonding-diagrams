@@ -306,6 +306,21 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
             zorder=1.9)  # under the die render (2) — these route beneath it
         ax.add_collection(bright)
         bright.set_clip_path(open_rect)
+        # Vias inside the opening are exposed too (the mask is open
+        # there) — the bare-laminate fill above would otherwise hide
+        # them. Gold-plated barrel, dark drill, clipped to the opening
+        # and still under the die render.
+        for v in cob.get("vias", []):
+            vx, vy = v["x_mm"] - ox, -(v["y_mm"] - oy)
+            barrel = Circle((vx, vy), v["size_mm"] / 2, facecolor=PCB_STYLE["cu"],
+                            edgecolor="none", zorder=1.95)
+            ax.add_patch(barrel)
+            barrel.set_clip_path(open_rect)
+            if v.get("drill_mm"):
+                drill = Circle((vx, vy), v["drill_mm"] / 2, facecolor=PCB_STYLE["drill"],
+                               edgecolor="none", zorder=1.96)
+                ax.add_patch(drill)
+                drill.set_clip_path(open_rect)
 
     # Die courtyard ticks (faint) over the substrate.
     _draw_shapes(ax, cob["graphics"].get("Dwgs.User", []),
