@@ -1,21 +1,24 @@
 """Render multi-page factory bonding diagrams.
 
 Per design, one three-page PDF in bonding/, every page on the shared
-document template (page title + wafer.space logo in the header, numbering
-note + page number in the footer):
+document template (page title + wafer.space logo in the header, page
+number in the footer):
   1. die pad diagram — the sibling repo's per-design pinout PDF
      (wafer-space-die-pad-diagrams/diagrams/) with its title header and
      info-panel footer cropped away (the crop is located by measuring
      content bands in the committed 180-dpi PNG, which shares the PDF's
      figure geometry), merged into the template page via pypdf;
   2. die placement — the COB breakout rendered from tmp/cob/<variant>.json
-     with the two-tone die render placed in the cavity. The die render is
-     in display orientation (QR top-right) and the die is placed rotated
+     with the two-tone die render placed in the cavity, plus the
+     orientation indicator: the die's QR cell highlighted with a
+     magnified inset, the board's rocket logo ringed, and the
+     bilingual (EN/中文) align-QR-to-rocket note. The die render is in
+     display orientation (QR top-right) and the die is placed rotated
      180° from GDS, so display frame = placement frame (both rotations
      cancel; see PAD_MAPPING.md in the sibling repo);
-  3. bonding — page 2 plus the bond wires, die pad n → COB pad n,
-     one black wire per pad. COB pads are numbered 0-based on the
-     drawing to match the die (physical PCB pads are +1).
+  3. bonding — page 2 plus the bond wires, one black wire per pad.
+     COB pads are numbered 0-based on the drawing to match the die
+     (physical PCB pads are +1).
 
 All pages are A4 portrait.
 
@@ -38,6 +41,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
@@ -54,6 +58,8 @@ sys.path.insert(0, str(REPO.parent / "wafer-space-die-pad-diagrams"))
 
 from make_diagrams import (  # noqa: E402  (sibling repo, path inserted above)
     PAD_COLORS,
+    WSIP_CELL_UM,
+    _wsip_corners,
     classify_net,
 )
 from plot_pcb import CLASS_COLORS, centered_rect, net_class  # noqa: E402
@@ -83,6 +89,8 @@ LOGO_W_FRAC = 0.125
 LOGO_RIGHT_FRAC = 0.965
 FOOTER_Y = 0.012
 PAGE_TOTAL = 3
+# Shared axes rect for the mm frame on pages 2–3 (top edge = 0.915).
+AXES_RECT = (0.03, 0.15, 0.94, 0.765)
 # Content area below the header rule where page 1's cropped pinout is
 # placed (PDF pt, origin bottom-left).
 CONTENT_BOX_PT = (30.0, 45.0, A4_W_PT - 30.0, 0.915 * A4_H_PT)
@@ -128,6 +136,38 @@ PCB_STYLE = {
 # for all wires: class-colored wires blended into the die/PCB palette.
 WIRE_DIAMETER_MM = 0.025
 WIRE_COLOR = "#111111"
+
+# Placement-page orientation indicator: dark red fiducial marks — a
+# highlight box + magnified inset on the die's QR cell, a ring on the
+# board's rocket logo (the red pad rims are brighter orange-red, so the
+# maroon still reads as a callout, not a class).
+FIDUCIAL_COLOR = "#9b1b1b"
+# Factory-facing callouts in English and Chinese (matplotlib falls back
+# per glyph to the first installed CJK family — see cjk_families()).
+FIDUCIAL_NOTE = "ALIGN DIE QR CODE WITH BOARD ROCKET"
+FIDUCIAL_NOTE_ZH = "将芯片二维码与板上火箭对齐"
+QR_LABEL = "die QR"
+QR_LABEL_ZH = "芯片二维码"
+ROCKET_LABEL = "board rocket"
+ROCKET_LABEL_ZH = "板上火箭"
+QR_ZOOM_VIEW_MM = 0.28   # inset view width (plot mm), centred on the QR cell
+QR_ZOOM_W_FRAC = 0.088   # inset width as figure fraction (square on paper)
+
+
+def cjk_families() -> list[str]:
+    """Installed font families that cover Chinese, for per-glyph fallback.
+
+    Matplotlib ≥3.6 walks a fontfamily list per glyph, so Latin text
+    keeps the document font while the Chinese picks the first available
+    family here (macOS system faces first, then Noto).
+    """
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    return [n for n in ("Hiragino Sans GB", "PingFang SC", "Noto Sans SC",
+                        "Arial Unicode MS", "Heiti TC", "Songti SC")
+            if n in installed]
+
+
+CJK_FAMILIES = cjk_families()
 
 # Wires land on the die-side edge of the PCB pad (real bonds land near
 # the inner edge, and the center-set pad number stays legible), pushed
@@ -199,18 +239,10 @@ def add_header(fig: plt.Figure, title: str, subtitle: str) -> None:
     ax.set_axis_off()
 
 
-def add_footer(fig: plt.Figure, note: str, page_num: int) -> None:
-    """Document template footer: numbering note left, page number right."""
-    fig.text(0.035, FOOTER_Y, note, fontsize=6.5, color="#888888",
-             ha="left", va="bottom")
+def add_footer(fig: plt.Figure, page_num: int) -> None:
+    """Document template footer: page number at the right margin."""
     fig.text(LOGO_RIGHT_FRAC, FOOTER_Y, f"page {page_num} / {PAGE_TOTAL}",
              fontsize=6.5, color="#888888", ha="right", va="bottom")
-
-
-def numbering_note(design: dict) -> str:
-    n = len(design["pads"])
-    return (f"COB pads numbered 0–{n - 1} to match the die; "
-            f"physical PCB pads are +1")
 
 
 def pinout_crop_pt(design: dict) -> tuple[float, float, float, float]:
@@ -263,7 +295,7 @@ def pinout_crop_pt(design: dict) -> tuple[float, float, float, float]:
     return float(box.left), bottom, float(box.right), top
 
 
-def build_pinout_page(design: dict, note: str) -> PageObject:
+def build_pinout_page(design: dict) -> PageObject:
     """Page 1: template page with the cropped pinout PDF merged into it.
 
     pypdf clips the merged page to its cropbox (page_merge_box defaults
@@ -272,7 +304,7 @@ def build_pinout_page(design: dict, note: str) -> PageObject:
     fig = plt.figure(figsize=(A4_W_IN, A4_H_IN))
     add_header(fig, "die pad diagram",
                f"{design['name']} · slot {design['slot_size']}")
-    add_footer(fig, note, 1)
+    add_footer(fig, 1)
     template = PAGE_DIR / f"{design['name']}_{design['slot_size']}_p1_template.pdf"
     with PdfPages(template) as pdf:
         pdf.savefig(fig)
@@ -519,12 +551,14 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
                         zorder=7)
 
 
-def draw_die(ax: plt.Axes, design: dict, fs: float, show_numbers: bool = True) -> None:
+def draw_die(ax: plt.Axes, design: dict, fs: float, show_numbers: bool = True,
+             img: np.ndarray | None = None) -> None:
     """Die render in the cavity + pad rectangles colored by die net class."""
     die_bb = design["die_bb_um"]
     w_mm, h_mm = design["die_w_um"] / 1000.0, design["die_h_um"] / 1000.0
 
-    img = mpimg.imread(REPO / design["bg_png"])
+    if img is None:
+        img = mpimg.imread(REPO / design["bg_png"])
     # origin="upper": PNG top row = display-frame top = plot-frame top.
     ax.imshow(img, extent=(-w_mm / 2, w_mm / 2, -h_mm / 2, h_mm / 2),
               origin="upper", zorder=2, interpolation="bilinear")
@@ -555,6 +589,116 @@ def draw_die(ax: plt.Axes, design: dict, fs: float, show_numbers: bool = True) -
                 lx, ly, ha, va = cx, cy - h / 2 - gap, "center", "top"
             ax.annotate(str(pad["n"]), (lx, ly), fontsize=3.2 * fs,
                         ha=ha, va=va, color="#111111", zorder=7)
+
+
+def die_qr_mm(design: dict) -> tuple[float, float, float]:
+    """Die QR cell centre + half-size in plot-frame mm.
+
+    _wsip_corners returns the QR bbox in the die's display frame (QR
+    top-right); the same centring as die_pad_mm maps it to plot mm.
+    """
+    bb = design["die_bb_um"]
+    qx0, qy0, qx1, qy1 = _wsip_corners(tuple(bb))[0]
+    return ((qx0 + qx1) / 2 - (bb[0] + bb[2]) / 2) / 1000.0, \
+           ((qy0 + qy1) / 2 - (bb[1] + bb[3]) / 2) / 1000.0, \
+           WSIP_CELL_UM / 2000.0
+
+
+def board_rocket_mm(cob: dict) -> tuple[float, float, float] | None:
+    """Board rocket artwork (wafer.space logo) centre + ring radius, plot mm.
+
+    The logo is board-level artwork: every poly in board F.SilkS/F.Cu
+    (the F.SilkS rect is the fab's serial-number marking box, excluded
+    the same way _draw_shapes' outline_only excludes it).
+    """
+    ox, oy = cob["padring"]["at_mm"]
+    xs, ys = [], []
+    for lay in ("F.SilkS", "F.Cu"):
+        for s in cob["board_graphics"].get(lay, []):
+            if s.get("type") != "poly" or "pts" not in s:
+                continue
+            for px, py in s["pts"]:
+                xs.append(px - ox)
+                ys.append(-(py - oy))
+    if not xs:
+        return None
+    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    r = math.hypot(max(xs) - min(xs), max(ys) - min(ys)) / 2 + 0.08
+    return cx, cy, r
+
+
+def draw_fiducials(ax: plt.Axes, cob: dict, fs: float, y_top: float) -> None:
+    """Placement-page fiducials: ring the board's rocket logo and label
+    it above the board (the die's QR cell gets the box + zoom inset of
+    draw_qr_zoom, so the header note reads as QR box ↔ rocket ring).
+    """
+    rocket = board_rocket_mm(cob)
+    if rocket is None:
+        print("WARN: no board rocket artwork found — fiducial ring skipped")
+        return
+    rx, ry, rr = rocket
+    lab_y = y_top + 1.45
+    ax.add_patch(Circle((rx, ry), rr, fill=False, edgecolor=FIDUCIAL_COLOR,
+                        lw=1.5 * fs, zorder=8))
+    ax.plot([rx, rx], [ry + rr + 0.06, lab_y - 0.05], color=FIDUCIAL_COLOR,
+            lw=0.7 * fs, zorder=8)
+    ax.annotate(f"{ROCKET_LABEL} / {ROCKET_LABEL_ZH}", (rx, lab_y),
+                ha="center", va="bottom", fontsize=6.5 * fs,
+                fontweight="bold", color=FIDUCIAL_COLOR, zorder=8,
+                fontfamily=["DejaVu Sans", *CJK_FAMILIES])
+
+
+def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
+                 img: np.ndarray, y_top: float) -> None:
+    """Placement-page QR callout: maroon box on the die's QR cell, leader
+    up to a magnified inset of that cell in the band above the board —
+    the fiducial the assembler aligns the board rocket to. The inset is
+    positioned in figure space (centred on the QR's figure-fraction x),
+    so the QR's data position is mapped through the settled
+    equal-aspect transform.
+    """
+    qx, qy, qh = die_qr_mm(design)
+    half_box = qh + 0.05  # highlight box pad around the 143 µm cell
+    ax.add_patch(Rectangle((qx - half_box, qy - half_box), 2 * half_box,
+                           2 * half_box, facecolor=FIDUCIAL_COLOR, alpha=0.25,
+                           edgecolor=FIDUCIAL_COLOR, lw=1.2 * fs, zorder=8))
+
+    fig.canvas.draw()  # settle the equal-aspect box before fig-space mapping
+
+    def to_fig(x: float, y: float) -> tuple[float, float]:
+        px, py = ax.transData.transform((x, y))
+        return (px / (fig.get_figwidth() * fig.dpi),
+                py / (fig.get_figheight() * fig.dpi))
+
+    cx_f, box_top_f = to_fig(qx, qy + half_box + 0.05)
+    _, board_top_f = to_fig(0.0, y_top)
+    inset_h = QR_ZOOM_W_FRAC * A4_W_IN / A4_H_IN  # square on paper
+    y0f = board_top_f + 0.006
+    axz = fig.add_axes((cx_f - QR_ZOOM_W_FRAC / 2, y0f,
+                        QR_ZOOM_W_FRAC, inset_h))
+    w_mm = design["die_w_um"] / 1000.0
+    h_mm = design["die_h_um"] / 1000.0
+    half = QR_ZOOM_VIEW_MM / 2
+    axz.imshow(img, extent=(-w_mm / 2, w_mm / 2, -h_mm / 2, h_mm / 2),
+               origin="upper")
+    axz.set_xlim(qx - half, qx + half)
+    axz.set_ylim(qy - half, qy + half)
+    axz.set_xticks(())
+    axz.set_yticks(())
+    axz.set_facecolor("white")
+    for sp in axz.spines.values():
+        sp.set_visible(True)
+        sp.set_edgecolor(FIDUCIAL_COLOR)
+        sp.set_linewidth(1.6 * fs)
+
+    fig.add_artist(Line2D([cx_f, cx_f], [box_top_f, y0f],
+                          transform=fig.transFigure, color=FIDUCIAL_COLOR,
+                          lw=0.9 * fs, zorder=8))
+    fig.text(cx_f, y0f + inset_h + 0.002, f"{QR_LABEL} / {QR_LABEL_ZH}",
+             ha="center", va="bottom", fontsize=5.5 * fs,
+             fontweight="bold", color="white",
+             fontfamily=["DejaVu Sans", *CJK_FAMILIES],
+             bbox=dict(facecolor=FIDUCIAL_COLOR, edgecolor="none", pad=1.6))
 
 
 def wire_segments(design: dict, cob: dict):
@@ -655,7 +799,7 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     fs = min(pw / 8.5, ph / 10.0)
 
     fig = plt.figure(figsize=(pw, ph))
-    ax = fig.add_axes((0.03, 0.15, 0.94, 0.765))
+    ax = fig.add_axes(AXES_RECT)
     ax.set_aspect("equal")
 
     # Final limits first: data-scale linewidths (traces, bond wires)
@@ -665,8 +809,9 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     ax.set_xlim(x0 - 1.2, x1 + 1.2)
     ax.set_ylim(y0 - 1.2, y1 + 2.2)
 
+    img = mpimg.imread(REPO / design["bg_png"])
     draw_board(ax, cob, fs)
-    draw_die(ax, design, fs)
+    draw_die(ax, design, fs, img=img)
     lengths = []
     if bonding:
         segments, lengths = wire_segments(design, cob)
@@ -686,16 +831,22 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     if bonding:
         add_header(fig, "bonding diagram",
                    f"{name} · slot {slot} · {len(segments)} wires, "
-                   f"die pad n → COB pad n, "
                    f"length {min(lengths):.2f}–{max(lengths):.2f} mm")
         page_num = 3
     else:
         add_header(fig, "die placement on PCB",
                    f"{name} · slot {slot} · "
-                   f"die {design['die_w_um']:.0f}×{design['die_h_um']:.0f} µm, "
-                   f"QR top-right (rocket corner)")
+                   f"die {design['die_w_um']:.0f}×{design['die_h_um']:.0f} µm")
+        # Orientation note in the band between the header rule and the
+        # diagram, echoing the fiducial rings drawn below.
+        fig.text(0.5, (HEADER_RULE_Y + (AXES_RECT[1] + AXES_RECT[3])) / 2,
+                 f"{FIDUCIAL_NOTE} / {FIDUCIAL_NOTE_ZH}", ha="center",
+                 va="center", fontsize=8.5, fontweight="bold",
+                 color=FIDUCIAL_COLOR, fontfamily=["DejaVu Sans", *CJK_FAMILIES])
+        draw_fiducials(ax, cob, fs, y1)
+        draw_qr_zoom(fig, ax, design, fs, img, y1)
         page_num = 2
-    add_footer(fig, numbering_note(design), page_num)
+    add_footer(fig, page_num)
     two_legends(ax, die_classes, pcb_classes, fs)
     return fig
 
@@ -715,7 +866,7 @@ def render_design(design: dict, cob: dict) -> Path:
             fig.savefig(PAGE_DIR / f"{stem}_{tag}.png", dpi=200)
             plt.close(fig)
 
-    page1 = build_pinout_page(design, numbering_note(design))
+    page1 = build_pinout_page(design)
 
     out = OUT_DIR / f"{stem}.pdf"
     writer = PdfWriter()
