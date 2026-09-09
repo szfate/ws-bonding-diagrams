@@ -1,9 +1,13 @@
 """Render multi-page factory bonding diagrams.
 
-Per design, one three-page PDF in bonding/:
-  1. die pinout — the existing per-design PDF from the sibling repo
-     (wafer-space-die-pad-diagrams/diagrams/), embedded via pypdf and
-     scaled onto A4;
+Per design, one three-page PDF in bonding/, every page on the shared
+document template (page title + wafer.space logo in the header, numbering
+note + page number in the footer):
+  1. die pad diagram — the sibling repo's per-design pinout PDF
+     (wafer-space-die-pad-diagrams/diagrams/) with its title header and
+     info-panel footer cropped away (the crop is located by measuring
+     content bands in the committed 180-dpi PNG, which shares the PDF's
+     figure geometry), merged into the template page via pypdf;
   2. die placement — the COB breakout rendered from tmp/cob/<variant>.json
      with the two-tone die render placed in the cavity. The die render is
      in display orientation (QR top-right) and the die is placed rotated
@@ -29,16 +33,21 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle, Patch, Polygon, Rectangle
+from PIL import Image
 from pypdf import PdfReader, PdfWriter, PageObject, Transformation
+from pypdf.generic import RectangleObject
 
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO.parent / "wafer-space-die-pad-diagrams"))
@@ -55,12 +64,28 @@ DEFAULT_COB = REPO / "tmp" / "cob" / "1x1.json"
 OUT_DIR = REPO / "bonding"
 PAGE_DIR = REPO / "tmp" / "pages"
 SIBLING_DIAGRAMS = REPO.parent / "wafer-space-die-pad-diagrams" / "diagrams"
+LOGO_PNG = REPO / "logo-raw.webp"
 
 DEFAULT_DESIGNS = ["WSLG_chip_top_10_2"]
 
 # Every page is A4 portrait (210×297 mm).
 A4_W_IN, A4_H_IN = 210 / 25.4, 297 / 25.4
 A4_W_PT, A4_H_PT = A4_W_IN * 72, A4_H_IN * 72
+
+# Document template geometry (figure fractions): title + logo in the
+# header above a hairline rule, note + page number in the footer.
+HEADER_TITLE_Y = 0.968
+HEADER_SUB_Y = 0.944
+HEADER_RULE_Y = 0.930
+LOGO_W_FRAC = 0.125
+# Right edge for logo / page counter — mirrors the 0.035 left margin
+# (7.4 mm in from the paper edge; the footer counter right-aligns here too).
+LOGO_RIGHT_FRAC = 0.965
+FOOTER_Y = 0.012
+PAGE_TOTAL = 3
+# Content area below the header rule where page 1's cropped pinout is
+# placed (PDF pt, origin bottom-left).
+CONTENT_BOX_PT = (30.0, 45.0, A4_W_PT - 30.0, 0.915 * A4_H_PT)
 
 DIE_CLASS_LABELS = {
     "gnd_digital": "DVSS",
@@ -142,23 +167,130 @@ def pinout_pdf_for(design: dict) -> Path:
         f"generate it in the sibling repo first")
 
 
-def pinout_page_size(design: dict) -> tuple[float, float]:
-    """Page 1's size in inches (informational; pages render on A4)."""
-    reader = PdfReader(str(pinout_pdf_for(design)))
-    box = reader.pages[0].mediabox
-    return float(box.width) / 72.0, float(box.height) / 72.0
+_logo_arr = None
 
 
-def a4_letterbox(page: PageObject) -> PageObject:
-    """Scale a page uniformly to fit and center it on a blank A4 portrait."""
-    box = page.mediabox
-    w, h = float(box.width), float(box.height)
-    s = min(A4_W_PT / w, A4_H_PT / h)
-    tx = (A4_W_PT - w * s) / 2 - float(box.left) * s
-    ty = (A4_H_PT - h * s) / 2 - float(box.bottom) * s
-    out = PageObject.create_blank_page(width=A4_W_PT, height=A4_H_PT)
-    out.merge_transformed_page(page, Transformation().scale(s, s).translate(tx, ty))
-    return out
+def _logo_img() -> np.ndarray:
+    """wafer.space logo, cropped to its alpha bbox (loaded once)."""
+    global _logo_arr
+    if _logo_arr is None:
+        if not LOGO_PNG.exists():
+            raise SystemExit(f"missing {LOGO_PNG} — needed for the page header")
+        img = mpimg.imread(LOGO_PNG)
+        ys, xs = np.where(img[..., 3] > 2)
+        _logo_arr = img[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    return _logo_arr
+
+
+def add_header(fig: plt.Figure, title: str, subtitle: str) -> None:
+    """Document template header: page title left, wafer.space logo right."""
+    fig.text(0.035, HEADER_TITLE_Y, title, fontsize=13, fontweight="bold",
+             ha="left", va="center")
+    if subtitle:
+        fig.text(0.035, HEADER_SUB_Y, subtitle, fontsize=7.5, color="#666666",
+                 ha="left", va="center")
+    fig.add_artist(Line2D([0.035, LOGO_RIGHT_FRAC], [HEADER_RULE_Y] * 2,
+                          transform=fig.transFigure, color="#d8d8d8", lw=0.7))
+    img = _logo_img()
+    h_frac = LOGO_W_FRAC * (img.shape[0] / img.shape[1]) * (A4_W_IN / A4_H_IN)
+    ax = fig.add_axes((LOGO_RIGHT_FRAC - LOGO_W_FRAC, HEADER_TITLE_Y - h_frac / 2,
+                       LOGO_W_FRAC, h_frac))
+    ax.imshow(img, aspect="auto", interpolation="bilinear")
+    ax.set_axis_off()
+
+
+def add_footer(fig: plt.Figure, note: str, page_num: int) -> None:
+    """Document template footer: numbering note left, page number right."""
+    fig.text(0.035, FOOTER_Y, note, fontsize=6.5, color="#888888",
+             ha="left", va="bottom")
+    fig.text(LOGO_RIGHT_FRAC, FOOTER_Y, f"page {page_num} / {PAGE_TOTAL}",
+             fontsize=6.5, color="#888888", ha="right", va="bottom")
+
+
+def numbering_note(design: dict) -> str:
+    n = len(design["pads"])
+    return (f"COB pads numbered 0–{n - 1} to match the die; "
+            f"physical PCB pads are +1")
+
+
+def pinout_crop_pt(design: dict) -> tuple[float, float, float, float]:
+    """(left, bottom, right, top) crop rect in PDF pt, isolating the die shot.
+
+    The sibling diagram carries a title header and an info-panel footer
+    that this document replaces with its own template. Rather than
+    duplicating the sibling's layout constants, measure content bands
+    from the committed 180-dpi PNG (same figure geometry as the PDF) and
+    cut midway through the first and last whitespace gaps. Falls back to
+    the full page (with a warning) if the bands don't read as
+    header / plot / footer.
+    """
+    pdf_path = pinout_pdf_for(design)
+    png = pdf_path.with_suffix(".png")
+    if not png.exists():
+        raise SystemExit(f"missing {png.name} next to the pinout PDF — "
+                         f"the crop locates the header/footer bands in it")
+    box = PdfReader(str(pdf_path)).pages[0].mediabox
+    im = np.asarray(Image.open(png).convert("L"))
+    dpi = im.shape[0] / (float(box.height) / 72.0)
+
+    dark_rows = (im < 128).sum(axis=1) >= 2
+    gap = int(0.07 * dpi)  # blank run long enough to split content bands
+    bands, start, blank = [], None, 0
+    for i, has in enumerate(dark_rows):
+        if has:
+            if start is None:
+                start = i
+            blank = 0
+        elif start is not None:
+            blank += 1
+            if blank >= gap:
+                bands.append((start, i - blank + 1))
+                start = None
+    if start is not None:
+        bands.append((start, im.shape[0]))
+
+    if (len(bands) < 2
+            or bands[0][1] - bands[0][0] > 1.5 * dpi   # title, ≤ a few lines
+            or bands[-1][1] - bands[-1][0] > 3.3 * dpi):  # info panel
+        print(f"WARN: {png.name}: unexpected content bands — embedding full page")
+        return 0.0, 0.0, float(box.width), float(box.height)
+
+    top_row = (bands[0][1] + bands[1][0]) // 2 if len(bands) >= 3 else bands[0][1]
+    bottom_row = (bands[-2][1] + bands[-1][0]) // 2 if len(bands) >= 3 else bands[-1][0]
+    pt_per_px = float(box.height) / im.shape[0]
+    top = float(box.height) - top_row * pt_per_px
+    bottom = float(box.height) - bottom_row * pt_per_px
+    return float(box.left), bottom, float(box.right), top
+
+
+def build_pinout_page(design: dict, note: str) -> PageObject:
+    """Page 1: template page with the cropped pinout PDF merged into it.
+
+    pypdf clips the merged page to its cropbox (page_merge_box defaults
+    to cropbox), so setting the crop rect is the whole crop.
+    """
+    fig = plt.figure(figsize=(A4_W_IN, A4_H_IN))
+    add_header(fig, "die pad diagram",
+               f"{design['name']} · slot {design['slot_size']}")
+    add_footer(fig, note, 1)
+    template = PAGE_DIR / f"{design['name']}_{design['slot_size']}_p1_template.pdf"
+    with PdfPages(template) as pdf:
+        pdf.savefig(fig)
+    plt.close(fig)
+
+    page = PageObject.create_blank_page(width=A4_W_PT, height=A4_H_PT)
+    page.merge_page(PdfReader(str(template)).pages[0])
+
+    src = PdfReader(str(pinout_pdf_for(design))).pages[0]
+    left, bottom, right, top = pinout_crop_pt(design)
+    src.cropbox = RectangleObject([left, bottom, right, top])
+    w, h = right - left, top - bottom
+    cx0, cy0, cx1, cy1 = CONTENT_BOX_PT
+    s = min((cx1 - cx0) / w, (cy1 - cy0) / h)
+    tx = cx0 + ((cx1 - cx0) - w * s) / 2 - left * s
+    ty = cy0 + ((cy1 - cy0) - h * s) / 2 - bottom * s
+    page.merge_transformed_page(src, Transformation().scale(s, s).translate(tx, ty))
+    return page
 
 
 def board_bounds(cob: dict) -> tuple[float, float, float, float]:
@@ -508,7 +640,7 @@ def two_legends(ax: plt.Axes, die_classes: list[str], pcb_classes: list[str],
 
 
 def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
-    """Page 2 (placement) or page 3 (bonding): the shared mm frame on A4.
+    """Page 2 (placement) or page 3 (bonding) on the shared A4 template.
 
     fs scales fonts and line widths so the 8.5×10 in reference layout
     shrinks proportionally onto A4.
@@ -523,14 +655,15 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     fs = min(pw / 8.5, ph / 10.0)
 
     fig = plt.figure(figsize=(pw, ph))
-    ax = fig.add_axes((0.03, 0.16, 0.94, 0.73))
+    ax = fig.add_axes((0.03, 0.15, 0.94, 0.765))
     ax.set_aspect("equal")
 
     # Final limits first: data-scale linewidths (traces, bond wires)
-    # need the applied axes transform.
+    # need the applied axes transform, and the draw inside draw_board
+    # must see the limits the page is rendered with.
     x0, y0, x1, y1 = board_bounds(cob)
     ax.set_xlim(x0 - 1.2, x1 + 1.2)
-    ax.set_ylim(y0 - 1.2, y1 + 4.3)
+    ax.set_ylim(y0 - 1.2, y1 + 2.2)
 
     draw_board(ax, cob, fs)
     draw_die(ax, design, fs)
@@ -547,26 +680,23 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     ax.annotate("2 mm", (sb_x + 1, sb_y), textcoords="offset points",
                 xytext=(0, 4), ha="center", fontsize=6.5 * fs)
 
-    ax.set_xlim(x0 - 1.2, x1 + 1.2)
-    ax.set_ylim(y0 - 1.2, y1 + 2.2)
     ax.set_axis_off()
 
     name, slot = design["name"], design["slot_size"]
     if bonding:
-        ax.set_title(f"{name} — bonding diagram (slot {slot})\n"
-                     f"{len(segments)} wires, die pad n → COB pad n, "
-                     f"length {min(lengths):.2f}–{max(lengths):.2f} mm",
-                     fontsize=11 * fs)
+        add_header(fig, "bonding diagram",
+                   f"{name} · slot {slot} · {len(segments)} wires, "
+                   f"die pad n → COB pad n, "
+                   f"length {min(lengths):.2f}–{max(lengths):.2f} mm")
+        page_num = 3
     else:
-        ax.set_title(f"{name} — die placement on COB (slot {slot})\n"
-                     f"die {design['die_w_um']:.0f}×{design['die_h_um']:.0f} µm, "
-                     f"QR top-right (rocket corner), padring origin at (0, 0) mm",
-                     fontsize=11 * fs)
+        add_header(fig, "die placement on PCB",
+                   f"{name} · slot {slot} · "
+                   f"die {design['die_w_um']:.0f}×{design['die_h_um']:.0f} µm, "
+                   f"QR top-right (rocket corner)")
+        page_num = 2
+    add_footer(fig, numbering_note(design), page_num)
     two_legends(ax, die_classes, pcb_classes, fs)
-    fig.text(0.01, 0.01, "inputs: reticle.oas (die) · 1x1-mezzanine.kicad_pcb (COB) "
-             "· wafer-space-die-pad-diagrams (pinout, page 1) · "
-             "COB pads numbered 0–73 to match the die; physical PCB pads are +1",
-             fontsize=5.5 * fs, color="#888888")
     return fig
 
 
@@ -585,12 +715,19 @@ def render_design(design: dict, cob: dict) -> Path:
             fig.savefig(PAGE_DIR / f"{stem}_{tag}.png", dpi=200)
             plt.close(fig)
 
+    page1 = build_pinout_page(design, numbering_note(design))
+
     out = OUT_DIR / f"{stem}.pdf"
     writer = PdfWriter()
-    writer.add_page(a4_letterbox(PdfReader(str(pinout_pdf_for(design))).pages[0]))
+    writer.add_page(page1)
     writer.append(str(pages_pdf))
     with open(out, "wb") as f:
         writer.write(f)
+
+    if shutil.which("pdftoppm"):  # p1 preview; p2/p3 save PNGs directly above
+        subprocess.run(
+            ["pdftoppm", "-png", "-r", "200", "-f", "1", "-l", "1", "-singlefile",
+             str(out), str(PAGE_DIR / f"{stem}_p1")], check=True)
     return out
 
 
