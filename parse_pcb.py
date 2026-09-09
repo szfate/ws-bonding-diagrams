@@ -3,8 +3,9 @@
 Extracts everything the bonding pages need from the padring footprint —
 all pads (number, position, size, rotation, net, pinfunction) plus the
 footprint graphics (die courtyard, padring annotations, mask opening) —
-along with the board outline from Edge.Cuts and a summary of the other
-footprints (e.g. the mezzanine connector).
+along with the board outline from Edge.Cuts, the copper (segments, vias,
+zone pour polygons), board-level silkscreen/Eco texts and graphics, and a
+summary of the other footprints (e.g. the mezzanine connector).
 
 Coordinates are kept in KiCad convention: millimetres, y pointing down.
 Callers must negate y before plotting in a math-up frame (see
@@ -184,7 +185,22 @@ def parse_graphic(node: list) -> dict | None:
             c = first(node, s)
             if c:
                 out[s] = list(_xy(c))
+    stroke = first(node, "stroke")
+    if stroke:
+        sw = first(stroke, "width")
+        if sw:
+            out["stroke_mm"] = float(sw[1])
     return out
+
+
+def parse_text(node: list) -> dict | None:
+    at = first(node, "at")
+    layer = first(node, "layer")
+    if at is None or layer is None or len(at) < 3:
+        return None
+    rot = float(at[3]) if len(at) > 3 else 0.0
+    return {"text": node[1], "x_mm": float(at[1]), "y_mm": float(at[2]),
+            "rot_deg": rot, "layer": layer[1]}
 
 
 def footprint_summary(fp: list) -> dict:
@@ -205,6 +221,7 @@ def extract(pcb_path: Path) -> dict:
 
     pads_out: list[dict] = []
     graphics: dict[str, list] = {}
+    board_graphics: dict[str, list] = {}
     padring_summary = None
     other_footprints = []
 
@@ -227,14 +244,79 @@ def extract(pcb_path: Path) -> dict:
                 if g:
                     graphics.setdefault(g["layer"], []).append(g)
         else:
+            # Front-side furniture of the other footprints (pin-1 silk
+            # marker; everything else on this board is back-side), in
+            # global coordinates.
+            fx, fy, frot = summary["at_mm"] + [summary["rot_deg"]]
+            r = math.radians(frot)
+            for g_node in _find_all(fp, "fp_line") + _find_all(fp, "fp_rect") + \
+                    _find_all(fp, "fp_poly") + _find_all(fp, "fp_circle") + _find_all(fp, "fp_arc"):
+                g = parse_graphic(g_node)
+                if not g or not (g["layer"] or "").startswith("F."):
+                    continue
+                for key in ("start", "end", "center", "mid"):
+                    if key in g:
+                        lx, ly = g[key]
+                        g[key] = [fx + lx * math.cos(r) - ly * math.sin(r),
+                                  fy + lx * math.sin(r) + ly * math.cos(r)]
+                if "pts" in g:
+                    g["pts"] = [[fx + lx * math.cos(r) - ly * math.sin(r),
+                                 fy + lx * math.sin(r) + ly * math.cos(r)]
+                                for lx, ly in g["pts"]]
+                board_graphics.setdefault(g["layer"], []).append(g)
             other_footprints.append(summary)
 
     edge_cuts = []
     for g_node in _find_all(root, "gr_line") + _find_all(root, "gr_rect") + \
             _find_all(root, "gr_poly") + _find_all(root, "gr_circle") + _find_all(root, "gr_arc"):
         g = parse_graphic(g_node)
-        if g and g["layer"] == "Edge.Cuts":
+        if not g:
+            continue
+        if g["layer"] == "Edge.Cuts":
             edge_cuts.append(g)
+        elif g["layer"]:  # silk boxes, Eco annotations — global frame
+            board_graphics.setdefault(g["layer"], []).append(g)
+
+    # Copper: front + back tracks (callers pick a layer), through vias,
+    # zone pours as filled polygons, board-level texts.
+    segments = []
+    for s in _find_all(root, "segment"):
+        layer, start, end = first(s, "layer"), first(s, "start"), first(s, "end")
+        if not (layer and start and end):
+            continue
+        seg = {"layer": layer[1], "start": list(_xy(start)), "end": list(_xy(end))}
+        width = first(s, "width")
+        if width:
+            seg["width"] = float(width[1])
+        net = first(s, "net")
+        if net and isinstance(net[-1], str):
+            seg["net"] = net[-1]
+        segments.append(seg)
+
+    vias = []
+    for v in _find_all(root, "via"):
+        at, size = first(v, "at"), first(v, "size")
+        if not (at and size):
+            continue
+        layers = first(v, "layers")
+        drill = first(v, "drill")
+        vias.append({"x_mm": float(at[1]), "y_mm": float(at[2]),
+                     "size_mm": float(size[1]),
+                     "drill_mm": float(drill[1]) if drill else None,
+                     "layers": list(layers[1:]) if layers else []})
+
+    zone_polygons = []
+    for z in _find_all(root, "zone"):
+        net_name = first(z, "net_name")
+        net = net_name[1] if net_name else ""
+        for fp_node in _find_all(z, "filled_polygon"):
+            layer, pts_node = first(fp_node, "layer"), first(fp_node, "pts")
+            if not (layer and pts_node):
+                continue
+            zone_polygons.append({"layer": layer[1], "net": net,
+                                  "pts": _xy_list(pts_node)})
+
+    texts = [t for t in (parse_text(n) for n in _find_all(root, "gr_text")) if t]
 
     return {
         "source": str(pcb_path),
@@ -243,6 +325,11 @@ def extract(pcb_path: Path) -> dict:
         "graphics": graphics,
         "edge_cuts": edge_cuts,
         "other_footprints": other_footprints,
+        "segments": segments,
+        "vias": vias,
+        "zone_polygons": zone_polygons,
+        "texts": texts,
+        "board_graphics": board_graphics,
     }
 
 

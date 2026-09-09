@@ -35,7 +35,8 @@ import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.collections import LineCollection
-from matplotlib.patches import Patch, Polygon, Rectangle
+from matplotlib.lines import Line2D
+from matplotlib.patches import Circle, Patch, Polygon, Rectangle
 from pypdf import PdfReader, PdfWriter, PageObject, Transformation
 
 REPO = Path(__file__).resolve().parent
@@ -77,6 +78,25 @@ PCB_CLASS_LABELS = {
     "PWR_AUX": "PWR_AUX",
     "signal": "signal",
 }
+
+# Photoreal board look, front-layer view. Copper under the soldermask is
+# muted; the F.Mask opening (the padring area) is drawn as exposed board
+# with the same copper re-drawn bright on top, clipped to the opening.
+PCB_STYLE = {
+    "mask": "#0e4f42",    # soldermask substrate
+    "pour": "#1a5f4c",    # GND pour under mask
+    "trace": "#2f7a5e",   # front traces under mask
+    "bare": "#4a4438",    # exposed laminate in the mask opening
+    "cu": "#c08548",      # bare copper in the mask opening
+    "via": "#b9bfc2",     # plated via barrel
+    "drill": "#101413",   # via drill hole
+    "pad": "#d4a94a",     # ENIG bond pad
+    "pad_num": "#1a1a1a",
+    "silk": "#e8e6df",
+}
+
+# Bond wire diameter (25 µm gold) — drawn true to page scale.
+WIRE_DIAMETER_MM = 0.025
 
 
 def die_pad_mm(pad: dict, die_bb: list[float]) -> tuple[float, float, float, float]:
@@ -145,62 +165,153 @@ def board_bounds(cob: dict) -> tuple[float, float, float, float]:
     return min(xs), -max(ys), max(xs), -min(ys)
 
 
-def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) -> None:
-    """COB furniture: outline, courtyard, mask opening, bond pads."""
-    ox, oy = cob["padring"]["at_mm"]
+def data_pt_per_mm(ax: plt.Axes) -> float:
+    """Page points per data mm, after aspect-equal box adjustment.
 
-    # Board outline.
+    Callers must have set the final limits first; the canvas draw lets
+    the equal-aspect machinery shrink the axes box so the extent is the
+    true applied scale.
+    """
+    fig = ax.figure
+    fig.canvas.draw()  # idempotent; backend is Agg in this pipeline
+    bb = ax.get_window_extent()
+    x0, x1 = ax.get_xlim()
+    return bb.width / (x1 - x0) * 72.0 / fig.dpi
+
+
+def _draw_shapes(ax: plt.Axes, shapes: list, style: dict, zorder: float,
+                 ox: float = 0.0, oy: float = 0.0,
+                 pt_per_mm: float | None = None) -> None:
+    """Outline-style graphics (line/rect/poly/circle) in global mm.
+
+    With pt_per_mm, each shape's own KiCad stroke width is drawn true to
+    scale; otherwise the linewidth in `style` is used as-is.
+    """
+    for shape in shapes:
+        call_style = dict(style)
+        if pt_per_mm is not None and shape.get("stroke_mm"):
+            call_style["lw"] = max(shape["stroke_mm"] * pt_per_mm, 0.3)
+        if shape["type"] == "line" and "start" in shape:
+            (x0, y0), (x1, y1) = shape["start"], shape["end"]
+            ax.plot([x0 - ox, x1 - ox], [-(y0 - oy), -(y1 - oy)], zorder=zorder, **call_style)
+        elif shape["type"] == "rect" and "start" in shape:
+            (x0, y0), (x1, y1) = shape["start"], shape["end"]
+            ax.add_patch(Rectangle(
+                (min(x0, x1) - ox, -max(y0, y1) + oy), abs(x1 - x0), abs(y1 - y0),
+                fill=False, zorder=zorder, **call_style))
+        elif shape["type"] == "poly" or "pts" in shape:
+            ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
+                                 closed=True, fill=False, zorder=zorder, **call_style))
+
+
+def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) -> None:
+    """COB furniture: substrate, front copper, mask opening, bond pads.
+
+    Front-layer view: soldermask substrate, muted F.Cu traces/pour/vias
+    under the mask, and the padring's F.Mask opening rendered as exposed
+    board with the copper beneath re-drawn bright, clipped to the opening.
+
+    Linewidths that carry geometry (traces) must be in data scale, so
+    callers set the axes limits first and pass pt_per_mm().
+    """
+    ox, oy = cob["padring"]["at_mm"]
+    pt_per_mm = data_pt_per_mm(ax)
+
+    # Substrate from Edge.Cuts (fill + outline).
     for shape in cob["edge_cuts"]:
         if shape["type"] == "rect" and "start" in shape:
             (x0, y0), (x1, y1) = shape["start"], shape["end"]
             ax.add_patch(Rectangle(
                 (min(x0, x1) - ox, -max(y0, y1) + oy),
                 abs(x1 - x0), abs(y1 - y0),
-                fill=False, edgecolor="black", lw=1.2 * fs, zorder=1))
+                facecolor=PCB_STYLE["mask"], edgecolor="black",
+                lw=1.2 * fs, zorder=0.5))
         elif "pts" in shape:
             ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
-                                 closed=True, fill=False, edgecolor="black",
-                                 lw=1.2 * fs, zorder=1))
+                                 closed=True, facecolor=PCB_STYLE["mask"],
+                                 edgecolor="black", lw=1.2 * fs, zorder=0.5))
 
-    # Footprint-local graphics: die courtyard ticks faint, solder-mask
-    # opening as a dashed magenta outline (the keep-out the bonder cares
-    # about). Wire-guide comments are verification-only — not on the pages.
-    for layer, style in (("Dwgs.User", dict(color="#cccccc", lw=0.4 * fs)),
-                         ("F.Mask", dict(color="#cc44aa", lw=0.7 * fs, ls="--"))):
-        for shape in cob["graphics"].get(layer, []):
-            if shape["type"] == "line" and "start" in shape:
-                (x0, y0), (x1, y1) = shape["start"], shape["end"]
-                ax.plot([x0, x1], [-y0, -y1], zorder=1, **style)
-            elif shape["type"] == "rect" and "start" in shape:
-                (x0, y0), (x1, y1) = shape["start"], shape["end"]
-                ax.add_patch(Rectangle(
-                    (min(x0, x1), -max(y0, y1)), abs(x1 - x0), abs(y1 - y0),
-                    fill=False, zorder=1, **style))
-            elif shape["type"] == "poly" or "pts" in shape:
-                ax.add_patch(Polygon([(px, -py) for px, py in shape["pts"]],
-                                     closed=True, fill=False, zorder=1, **style))
+    # Front copper under the mask: pour islands + traces (muted) + vias.
+    pour_pts = [p["pts"] for p in cob.get("zone_polygons", [])
+                if p["layer"] == "F.Cu"]
+    for pts in pour_pts:
+        ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in pts],
+                             closed=True, facecolor=PCB_STYLE["pour"],
+                             edgecolor="none", zorder=1))
+    f_segs = [(px - ox, -(py - oy))
+              for s in cob.get("segments", []) if s["layer"] == "F.Cu"
+              for px, py in (s["start"], s["end"])]
+    # True-to-scale trace widths: KiCad mm → axes data scale.
+    f_widths = [s.get("width", 0.1) * pt_per_mm
+                for s in cob.get("segments", []) if s["layer"] == "F.Cu"]
+    ax.add_collection(LineCollection(
+        [(f_segs[i], f_segs[i + 1]) for i in range(0, len(f_segs), 2)],
+        colors=PCB_STYLE["trace"], linewidths=f_widths, capstyle="round",
+        zorder=1.2))
+    for v in cob.get("vias", []):
+        ax.add_patch(Circle((v["x_mm"] - ox, -(v["y_mm"] - oy)), v["size_mm"] / 2,
+                            facecolor=PCB_STYLE["via"], edgecolor="none", zorder=1.4))
+        if v.get("drill_mm"):
+            ax.add_patch(Circle((v["x_mm"] - ox, -(v["y_mm"] - oy)), v["drill_mm"] / 2,
+                                facecolor=PCB_STYLE["drill"], edgecolor="none",
+                                zorder=1.45))
 
-    # Bond pads: ring filled by pin class, GND extras (paddle + stitches)
-    # dashed-outlined.
+    # Solder-mask opening (footprint-local = plot frame): exposed board
+    # with the copper beneath re-drawn bright, clipped to the opening.
+    open_rect = None
+    for shape in cob["graphics"].get("F.Mask", []):
+        if shape["type"] == "rect" and "start" in shape:
+            (x0, y0), (x1, y1) = shape["start"], shape["end"]
+            open_rect = Rectangle(
+                (min(x0, x1), -max(y0, y1)), abs(x1 - x0), abs(y1 - y0),
+                facecolor=PCB_STYLE["bare"], edgecolor=PCB_STYLE["cu"],
+                lw=0.5 * fs, zorder=1.8)
+            ax.add_patch(open_rect)
+    if open_rect is not None:
+        for pts in pour_pts:
+            p = Polygon([(px, -py) for px, py in pts], closed=True,
+                        facecolor=PCB_STYLE["cu"], edgecolor="none", zorder=2)
+            ax.add_patch(p)
+            p.set_clip_path(open_rect)
+        bright = LineCollection(
+            [(f_segs[i], f_segs[i + 1]) for i in range(0, len(f_segs), 2)],
+            colors=PCB_STYLE["cu"], linewidths=f_widths, capstyle="round",
+            zorder=1.9)  # under the die render (2) — these route beneath it
+        ax.add_collection(bright)
+        bright.set_clip_path(open_rect)
+
+    # Die courtyard ticks (faint) over the substrate.
+    _draw_shapes(ax, cob["graphics"].get("Dwgs.User", []),
+                 dict(color="#cccccc", lw=0.4 * fs), zorder=3)
+
+    # Board silkscreen (pin-1 marker, marking box) — global board frame,
+    # unlike the footprint-local graphics above; strokes at their KiCad
+    # widths. Eco layers are assembly planning, not bonding info — skipped.
+    _draw_shapes(ax, cob["board_graphics"].get("F.SilkS", []),
+                 dict(color=PCB_STYLE["silk"]), zorder=3, ox=ox, oy=oy,
+                 pt_per_mm=pt_per_mm)
+
+    # Bond pads: gold ENIG ring with a class-colored rim, GND extras
+    # (paddle + stitches) dashed-outlined.
     for pad in cob["pads"]:
         x, y = pad["x_mm"], pad["y_mm"]
         w, h = pad["size_mm"]
-        extra = pad["num"] in EXTRA_PCB_PADS
+        cls = CLASS_COLORS[net_class(pad)]
         poly = centered_rect(x, -y, w, h, -pad["rot_deg"])
-        if extra:
+        if pad["num"] in EXTRA_PCB_PADS:
             poly.set_facecolor("none")
+            poly.set_edgecolor(PCB_STYLE["pad"])
             poly.set_linestyle("--")
             poly.set_linewidth(0.8 * fs)
         else:
-            poly.set_facecolor(CLASS_COLORS[net_class(pad)])
-            poly.set_alpha(0.95)
-            poly.set_linewidth(0)
-        poly.set_edgecolor(CLASS_COLORS[net_class(pad)])
+            poly.set_facecolor(PCB_STYLE["pad"])
+            poly.set_edgecolor(cls)
+            poly.set_linewidth(1.0 * fs)
         poly.set_zorder(4)
         ax.add_patch(poly)
-        if show_numbers and not extra:
+        if show_numbers and pad["num"] not in EXTRA_PCB_PADS:
             ax.annotate(pad["num"], (x, -y), fontsize=4.2 * fs, ha="center",
-                        va="center", color="black", zorder=7)
+                        va="center", color=PCB_STYLE["pad_num"], zorder=7)
 
 
 def draw_die(ax: plt.Axes, design: dict, fs: float, show_numbers: bool = True) -> None:
@@ -275,13 +386,19 @@ def two_legends(ax: plt.Axes, die_classes: list[str], pcb_classes: list[str],
     """Die-net legend and COB-pin legend, stacked below the axes."""
     die = [Patch(facecolor=PAD_COLORS[c][0], edgecolor="black", lw=0.3,
                  label=DIE_CLASS_LABELS[c]) for c in die_classes]
-    pcb = [Patch(facecolor=CLASS_COLORS[c], label=PCB_CLASS_LABELS[c])
-           for c in pcb_classes]
+    # COB pins: gold pads rimmed by class, plus the board furniture.
+    pcb = [Patch(facecolor=PCB_STYLE["pad"], edgecolor=CLASS_COLORS[c], lw=1.2,
+                 label=PCB_CLASS_LABELS[c]) for c in pcb_classes]
+    pcb += [
+        Patch(facecolor=PCB_STYLE["cu"], edgecolor="none", label="front Cu"),
+        Line2D([], [], marker="o", ms=4, mfc=PCB_STYLE["via"], mec="none",
+               ls="none", label="via"),
+    ]
     # Two legends: add_artist pins the first one before the second call,
     # which would otherwise replace it.
-    leg_pcb = ax.legend(handles=pcb, title="COB pin class", loc="upper left",
-                        bbox_to_anchor=(0, -0.062), ncol=5, fontsize=6 * fs,
-                        title_fontsize=6.5 * fs, frameon=False)
+    leg_pcb = ax.legend(handles=pcb, title="COB pin class / board",
+                        loc="upper left", bbox_to_anchor=(0, -0.062), ncol=7,
+                        fontsize=6 * fs, title_fontsize=6.5 * fs, frameon=False)
     ax.add_artist(leg_pcb)
     ax.legend(handles=die, title="die net class (pads + wires)",
               loc="upper left", bbox_to_anchor=(0, -0.006), ncol=7,
@@ -307,16 +424,22 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     ax = fig.add_axes((0.03, 0.16, 0.94, 0.73))
     ax.set_aspect("equal")
 
+    # Final limits first: data-scale linewidths (traces, bond wires)
+    # need the applied axes transform.
+    x0, y0, x1, y1 = board_bounds(cob)
+    ax.set_xlim(x0 - 1.2, x1 + 1.2)
+    ax.set_ylim(y0 - 1.2, y1 + 4.3)
+
     draw_board(ax, cob, fs)
     draw_die(ax, design, fs)
     lengths = []
     if bonding:
         segments, colors, lengths = wire_segments(design, cob)
-        ax.add_collection(LineCollection(segments, colors=colors,
-                                         linewidths=0.8 * fs, zorder=4.5))
+        ax.add_collection(LineCollection(
+            segments, colors=colors,
+            linewidths=WIRE_DIAMETER_MM * data_pt_per_mm(ax), zorder=4.5))
 
     # Scale bar outside the top-left board corner.
-    x0, y0, x1, y1 = board_bounds(cob)
     sb_x, sb_y = x0, y1 + 0.9
     ax.plot([sb_x, sb_x + 2], [sb_y, sb_y], color="black", lw=1.5 * fs)
     ax.annotate("2 mm", (sb_x + 1, sb_y), textcoords="offset points",
