@@ -1,0 +1,15 @@
+[project]
+name = "bonding-diagrams"
+version = "0.1.0"
+description = "Factory bonding diagrams for the wafer.space ws-run1 reticle: die pinout, die placement on the COB breakout, and bond wires."
+requires-python = ">=3.12"
+dependencies = [
+    "klayout>=0.30.8",
+    "matplotlib>=3.10.8",
+    "pillow>=11.0.0",
+    "pypdf>=5.0.0",
+    "segno>=1.6.0",
+]
+
+[dependency-groups]
+dev = []
