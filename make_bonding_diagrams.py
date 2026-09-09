@@ -9,8 +9,9 @@ Per design, one three-page PDF in bonding/:
      in display orientation (QR top-right) and the die is placed rotated
      180° from GDS, so display frame = placement frame (both rotations
      cancel; see PAD_MAPPING.md in the sibling repo);
-  3. bonding — page 2 plus the bond wires, die pad n → COB pad n+1,
-     colored by die net class (same palette as page 1).
+  3. bonding — page 2 plus the bond wires, die pad n → COB pad n,
+     one black wire per pad. COB pads are numbered 0-based on the
+     drawing to match the die (physical PCB pads are +1).
 
 All pages are A4 portrait.
 
@@ -79,24 +80,36 @@ PCB_CLASS_LABELS = {
     "signal": "signal",
 }
 
-# Photoreal board look, front-layer view. Copper under the soldermask is
-# muted; the F.Mask opening (the padring area) is drawn as exposed board
-# with the same copper re-drawn bright on top, clipped to the opening.
+# Photoreal board look, front-layer view, in pastels: the board is
+# background context, so everything PCB is light and desaturated and the
+# saturated colors are reserved for what matters (pads, wires, die).
+# Copper under the soldermask is muted; the F.Mask opening (the padring
+# area) is drawn as exposed board with the same copper re-drawn on top,
+# clipped to the opening.
 PCB_STYLE = {
-    "mask": "#0e4f42",    # soldermask substrate
-    "pour": "#1a5f4c",    # GND pour under mask
-    "trace": "#2f7a5e",   # front traces under mask
-    "bare": "#4a4438",    # exposed laminate in the mask opening
-    "cu": "#c08548",      # bare copper in the mask opening
-    "via": "#b9bfc2",     # plated via barrel
-    "drill": "#101413",   # via drill hole
-    "pad": "#d4a94a",     # ENIG bond pad
+    "mask": "#cfe0d8",    # soldermask substrate (pastel mint)
+    "pour": "#bdd6ca",    # GND pour under mask
+    "trace": "#a5c3b5",   # front traces under mask
+    "bare": "#e9e2d4",    # exposed laminate in the mask opening
+    "cu": "#d9b38c",      # bare copper in the mask opening
+    "via": "#c6cdcf",     # plated via barrel
+    "drill": "#8b938f",   # via drill hole
+    "pad": "#d4a94a",     # ENIG bond pad (kept saturated — focal)
     "pad_num": "#1a1a1a",
-    "silk": "#e8e6df",
+    "silk": "#faf9f4",
 }
 
-# Bond wire diameter (25 µm gold) — drawn true to page scale.
+# Bond wire diameter (25 µm gold) — drawn true to page scale. One color
+# for all wires: class-colored wires blended into the die/PCB palette.
 WIRE_DIAMETER_MM = 0.025
+WIRE_COLOR = "#111111"
+
+# Wires land on the die-side edge of the PCB pad (real bonds land near
+# the inner edge, and the center-set pad number stays legible), pushed
+# this fraction of the pad's long-axis length further inside (min 0.03
+# mm so the round wire cap sits fully on the gold).
+LANDING_INSET_FRACTION = 0.10
+LANDING_INSET_MIN_MM = 0.03
 
 
 def die_pad_mm(pad: dict, die_bb: list[float]) -> tuple[float, float, float, float]:
@@ -224,12 +237,12 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
             ax.add_patch(Rectangle(
                 (min(x0, x1) - ox, -max(y0, y1) + oy),
                 abs(x1 - x0), abs(y1 - y0),
-                facecolor=PCB_STYLE["mask"], edgecolor="black",
+                facecolor=PCB_STYLE["mask"], edgecolor="#6f7a75",
                 lw=1.2 * fs, zorder=0.5))
         elif "pts" in shape:
             ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
                                  closed=True, facecolor=PCB_STYLE["mask"],
-                                 edgecolor="black", lw=1.2 * fs, zorder=0.5))
+                                 edgecolor="#6f7a75", lw=1.2 * fs, zorder=0.5))
 
     # Front copper under the mask: pour islands + traces (muted) + vias.
     pour_pts = [p["pts"] for p in cob.get("zone_polygons", [])
@@ -310,8 +323,11 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
         poly.set_zorder(4)
         ax.add_patch(poly)
         if show_numbers and pad["num"] not in EXTRA_PCB_PADS:
-            ax.annotate(pad["num"], (x, -y), fontsize=4.2 * fs, ha="center",
-                        va="center", color=PCB_STYLE["pad_num"], zorder=7)
+            # Diagram numbering matches the die (0-based); physical PCB
+            # pads are +1 (see the page footer note).
+            ax.annotate(str(int(pad["num"]) - 1), (x, -y), fontsize=4.2 * fs,
+                        ha="center", va="center", color=PCB_STYLE["pad_num"],
+                        zorder=7)
 
 
 def draw_die(ax: plt.Axes, design: dict, fs: float, show_numbers: bool = True) -> None:
@@ -353,16 +369,17 @@ def draw_die(ax: plt.Axes, design: dict, fs: float, show_numbers: bool = True) -
 
 
 def wire_segments(design: dict, cob: dict):
-    """Wire fan: die pad n → COB pad n+1, start clipped to the die pad edge.
+    """Wire fan: die pad n → COB pad n (physical pad n+1), die-pad-edge start.
 
-    Returns (segments, colors, lengths) in plot-frame mm.
+    Returns (segments, lengths) in plot-frame mm. Wires are drawn in a
+    single color — class-colored wires blended into the die/PCB palette.
     """
     die_bb = design["die_bb_um"]
     die_pads = {p["n"]: p for p in design["pads"]}
     ring = sorted((p for p in cob["pads"] if p["num"] not in EXTRA_PCB_PADS),
                   key=lambda p: int(p["num"]))
 
-    segments, colors, lengths = [], [], []
+    segments, lengths = [], []
     for pcb in ring:
         dp = die_pads.get(int(pcb["num"]) - 1)
         if dp is None:
@@ -375,10 +392,38 @@ def wire_segments(design: dict, cob: dict):
         ts = [abs(half / d) for half, d in ((w / 2, dx), (h / 2, dy)) if d]
         sx, sy = (cx, cy) if not ts else (cx + dx * min(ts), cy + dy * min(ts))
 
+        # End at the center of the PCB pad's die-facing edge, pulled
+        # LANDING_INSET_MM inside so the tip sits on the gold. Padring
+        # pads point radially — the long axis faces the die — so the
+        # die-facing edge is the inner end of the long axis, signed by
+        # the toward-die-center direction. (A ray-exit test picks the
+        # side edge for corner pads, where the toward-die direction is
+        # diagonal, scattering the landings mid-pad.)
+        rr = math.radians(pcb["rot_deg"])
+        dist_c = math.hypot(px, py)
+        if dist_c:
+            nx, ny = -px / dist_c, -py / dist_c
+            # Pad rects are drawn at -rot (KiCad y-down → plot CCW);
+            # express the toward-die direction in the pad's local frame.
+            lx = nx * math.cos(rr) - ny * math.sin(rr)
+            ly = nx * math.sin(rr) + ny * math.cos(rr)
+            pw, ph = pcb["size_mm"]
+            long_len = max(pw, ph)
+            inset = max(LANDING_INSET_FRACTION * long_len, LANDING_INSET_MIN_MM)
+            if pw >= ph:
+                lpt = (math.copysign(pw / 2 - inset, lx), 0.0)
+            else:
+                lpt = (0.0, math.copysign(ph / 2 - inset, ly))
+            # Local edge center → plot frame (rotation by -rr).
+            ca, sa = math.cos(rr), -math.sin(rr)
+            px += lpt[0] * ca - lpt[1] * sa
+            py += lpt[0] * sa + lpt[1] * ca
+
         segments.append([(sx, sy), (px, py)])
-        lengths.append(math.hypot(dx, dy))
-        colors.append(PAD_COLORS[classify_net(dp["net"])][0])
-    return segments, colors, lengths
+        # Report the drawn wire's length (die pad edge → landing point),
+        # not the center-to-center distance.
+        lengths.append(math.hypot(px - sx, py - sy))
+    return segments, lengths
 
 
 def two_legends(ax: plt.Axes, die_classes: list[str], pcb_classes: list[str],
@@ -400,7 +445,7 @@ def two_legends(ax: plt.Axes, die_classes: list[str], pcb_classes: list[str],
                         loc="upper left", bbox_to_anchor=(0, -0.062), ncol=7,
                         fontsize=6 * fs, title_fontsize=6.5 * fs, frameon=False)
     ax.add_artist(leg_pcb)
-    ax.legend(handles=die, title="die net class (pads + wires)",
+    ax.legend(handles=die, title="die net class (pads)",
               loc="upper left", bbox_to_anchor=(0, -0.006), ncol=7,
               fontsize=6 * fs, title_fontsize=6.5 * fs, frameon=False)
 
@@ -434,9 +479,9 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     draw_die(ax, design, fs)
     lengths = []
     if bonding:
-        segments, colors, lengths = wire_segments(design, cob)
+        segments, lengths = wire_segments(design, cob)
         ax.add_collection(LineCollection(
-            segments, colors=colors,
+            segments, colors=WIRE_COLOR,
             linewidths=WIRE_DIAMETER_MM * data_pt_per_mm(ax), zorder=4.5))
 
     # Scale bar outside the top-left board corner.
@@ -452,7 +497,7 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     name, slot = design["name"], design["slot_size"]
     if bonding:
         ax.set_title(f"{name} — bonding diagram (slot {slot})\n"
-                     f"{len(segments)} wires, die pad n → COB pad n+1, "
+                     f"{len(segments)} wires, die pad n → COB pad n, "
                      f"length {min(lengths):.2f}–{max(lengths):.2f} mm",
                      fontsize=11 * fs)
     else:
@@ -462,7 +507,8 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
                      fontsize=11 * fs)
     two_legends(ax, die_classes, pcb_classes, fs)
     fig.text(0.01, 0.01, "inputs: reticle.oas (die) · 1x1-mezzanine.kicad_pcb (COB) "
-             "· wafer-space-die-pad-diagrams (pinout, page 1)",
+             "· wafer-space-die-pad-diagrams (pinout, page 1) · "
+             "COB pads numbered 0–73 to match the die; physical PCB pads are +1",
              fontsize=5.5 * fs, color="#888888")
     return fig
 
