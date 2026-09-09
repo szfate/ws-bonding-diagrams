@@ -198,23 +198,37 @@ def _draw_shapes(ax: plt.Axes, shapes: list, style: dict, zorder: float,
     """Outline-style graphics (line/rect/poly/circle) in global mm.
 
     With pt_per_mm, each shape's own KiCad stroke width is drawn true to
-    scale; otherwise the linewidth in `style` is used as-is.
+    scale; otherwise the linewidth in `style` is used as-is. Shapes KiCad
+    marks fill=yes (e.g. the logo's silk artwork) are drawn filled with
+    the style color and no edge.
     """
     for shape in shapes:
         call_style = dict(style)
         if pt_per_mm is not None and shape.get("stroke_mm"):
             call_style["lw"] = max(shape["stroke_mm"] * pt_per_mm, 0.3)
+        filled = bool(shape.get("fill"))
         if shape["type"] == "line" and "start" in shape:
             (x0, y0), (x1, y1) = shape["start"], shape["end"]
             ax.plot([x0 - ox, x1 - ox], [-(y0 - oy), -(y1 - oy)], zorder=zorder, **call_style)
         elif shape["type"] == "rect" and "start" in shape:
             (x0, y0), (x1, y1) = shape["start"], shape["end"]
-            ax.add_patch(Rectangle(
-                (min(x0, x1) - ox, -max(y0, y1) + oy), abs(x1 - x0), abs(y1 - y0),
-                fill=False, zorder=zorder, **call_style))
+            if filled:
+                ax.add_patch(Rectangle(
+                    (min(x0, x1) - ox, -max(y0, y1) + oy), abs(x1 - x0), abs(y1 - y0),
+                    facecolor=call_style.pop("color"), edgecolor="none",
+                    zorder=zorder, **call_style))
+            else:
+                ax.add_patch(Rectangle(
+                    (min(x0, x1) - ox, -max(y0, y1) + oy), abs(x1 - x0), abs(y1 - y0),
+                    fill=False, zorder=zorder, **call_style))
         elif shape["type"] == "poly" or "pts" in shape:
-            ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
-                                 closed=True, fill=False, zorder=zorder, **call_style))
+            if filled:
+                ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
+                                     closed=True, facecolor=call_style.pop("color"),
+                                     edgecolor="none", zorder=zorder, **call_style))
+            else:
+                ax.add_patch(Polygon([(px - ox, -(py - oy)) for px, py in shape["pts"]],
+                                     closed=True, fill=False, zorder=zorder, **call_style))
 
 
 def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) -> None:

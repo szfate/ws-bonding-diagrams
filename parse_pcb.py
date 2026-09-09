@@ -200,6 +200,9 @@ def parse_graphic(node: list) -> dict | None:
         sw = first(stroke, "width")
         if sw:
             out["stroke_mm"] = float(sw[1])
+    fill = first(node, "fill")
+    if fill:
+        out["fill"] = fill[1] in ("yes", "true", "solid")
     return out
 
 
