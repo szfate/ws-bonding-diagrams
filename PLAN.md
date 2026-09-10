@@ -13,8 +13,9 @@ Four stages, each a small module with a file intermediate so stages can
 be re-run independently:
 
 1. **`extract_dies.py`** — OAS → die data + background render.
-   Reuses `wafer-space-die-pad-diagrams/make_diagrams.py` by import
-   (`sys.path` insert; vendor later if it drifts): pad extraction
+   Vendored `make_diagrams.py` from the sibling repo (it can no longer
+   take changes; the vendored copy's only delta is the `max_px`
+   parameter on `render_gds_background`): pad extraction
    (layer 37/0, ≥30 µm edge filter), net labels from `Metal5_Label` /
    `MetalTop_Label`, 180° display rotation, two-tone GDS render.
    Emits `tmp/pads.json` — per design: pads[] (`n`, x/y µm, net, edge),

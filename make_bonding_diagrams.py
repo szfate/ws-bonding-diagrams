@@ -38,7 +38,6 @@ import json
 import math
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import matplotlib.font_manager as font_manager
@@ -55,9 +54,8 @@ from pypdf import PdfReader, PdfWriter, PageObject, Transformation
 from pypdf.generic import RectangleObject
 
 REPO = Path(__file__).resolve().parent
-sys.path.insert(0, str(REPO.parent / "wafer-space-die-pad-diagrams"))
 
-from make_diagrams import (  # noqa: E402  (sibling repo, path inserted above)
+from make_diagrams import (  # noqa: E402  (vendored, see its module header)
     PAD_COLORS,
     WSIP_CELL_UM,
     _wsip_corners,
@@ -138,6 +136,17 @@ PCB_STYLE = {
 WIRE_DIAMETER_MM = 0.025
 WIRE_COLOR = "#111111"
 
+# Raster resample target for savefig to PDF. matplotlib embeds imshow
+# images resampled to (displayed inches × savefig dpi) — the figure dpi
+# default (100) crushed the 8000 px die render to ~90×117 px. At 2400
+# the die lands at ~2800–3400 px embedded (still downsampled from the
+# 8000 px source, ≈1000+ dpi on paper) and the QR zoom inset at ~1750 px.
+# Vector content is unaffected; only raster artists use this grid.
+# The die imshows must use interpolation="nearest" alongside this: any
+# smoothing filter invents gray values in the two-tone dithered render,
+# which flate cannot compress (GD03's die stream alone was 10.9 MB).
+PDF_RASTER_DPI = 2400
+
 # Placement-page orientation indicator: dark red fiducial marks — a
 # highlight box + magnified inset on the die's QR cell, a ring on the
 # board's rocket logo (the red pad rims are brighter orange-red, so the
@@ -210,6 +219,22 @@ def die_pad_mm(pad: dict, die_bb: list[float]) -> tuple[float, float, float, flo
     w = (pad["x1_um"] - pad["x0_um"]) / 1000.0
     h = (pad["y1_um"] - pad["y0_um"]) / 1000.0
     return cx, cy, w, h
+
+
+def min_pad_pitch_mm(design: dict) -> float:
+    """Smallest centre-to-centre pitch between adjacent same-edge pads, mm.
+
+    Drives the die pad-label font: labels sit one per pad along each die
+    edge, so the pitch — not the page size — is the hard width budget.
+    """
+    die_bb = design["die_bb_um"]
+    by_edge: dict[str, list[float]] = {}
+    for pad in design["pads"]:
+        cx, cy, _, _ = die_pad_mm(pad, die_bb)
+        along = cx if pad.get("edge") in ("T", "B") else cy
+        by_edge.setdefault(pad.get("edge") or "T", []).append(along)
+    pitch = min((b - a for pts in by_edge.values() for a, b in zip(sorted(pts), sorted(pts)[1:])), default=0.1)
+    return max(pitch, 1e-3)
 
 
 def pinout_pdf_for(design: dict) -> Path:
@@ -662,24 +687,31 @@ def draw_die(ax: plt.Axes, design: dict, fs: float, show_numbers: bool = True,
     if img is None:
         img = mpimg.imread(REPO / design["bg_png"])
     # origin="upper": PNG top row = display-frame top = plot-frame top.
+    # interpolation="nearest": the two-tone dithered render must survive
+    # the PDF resample (displayed inches × PDF_RASTER_DPI) pixel-for-pixel —
+    # bilinear creates gray values that explode the flate stream (GD03's
+    # die alone was 10.9 MB compressed).
     ax.imshow(img, extent=(-w_mm / 2, w_mm / 2, -h_mm / 2, h_mm / 2),
-              origin="upper", zorder=2, interpolation="bilinear")
+              origin="upper", zorder=2, interpolation="nearest")
     ax.add_patch(Rectangle((-w_mm / 2, -h_mm / 2), w_mm, h_mm, fill=False,
                            edgecolor="black", lw=0.8 * fs, zorder=2.5))
 
-    for pad in design["pads"]:
-        cx, cy, w, h = die_pad_mm(pad, die_bb)
-        fill = PAD_COLORS[classify_net(pad["net"])][0]
-        ax.add_patch(Rectangle((cx - w / 2, cy - h / 2), w, h,
-                               facecolor=fill, edgecolor="black", lw=0.25 * fs,
-                               zorder=4))
-        if show_numbers:
+    if show_numbers:
+        # Labels are sized to the pad pitch, not the page: fs is ~constant
+        # across boards, but the dense TQVA padframe (14 pads per 0.5 mm
+        # edge, ~33 um pitch) turns a 3 pt font into an overlapping blob.
+        # Two digits are ~1.27 em wide, so 0.7 x pitch keeps a margin;
+        # the 1x1 board's pitch still allows the full 3.2 * fs.
+        pitch = min_pad_pitch_mm(design)
+        nfs = min(3.2 * fs, 0.7 * pitch * data_pt_per_mm(ax))
+        gap = min(0.08, 1.2 * pitch)
+        for pad in design["pads"]:
+            cx, cy, w, h = die_pad_mm(pad, die_bb)
             # Number just inside the pad, straight in from the pad's edge
             # (perpendicular to the die edge — pushing toward the die
             # center would drag corner numbers diagonally off their pads),
             # aligned away from the pad so the gap stays clear.
             # _classify_edge returns single letters T/L/B/R.
-            gap = 0.13
             e = pad.get("edge")
             if e == "B":
                 lx, ly, ha, va = cx, cy + h / 2 + gap, "center", "bottom"
@@ -689,8 +721,15 @@ def draw_die(ax: plt.Axes, design: dict, fs: float, show_numbers: bool = True,
                 lx, ly, ha, va = cx - w / 2 - gap, cy, "right", "center"
             else:  # "T"
                 lx, ly, ha, va = cx, cy - h / 2 - gap, "center", "top"
-            ax.annotate(str(pad["n"]), (lx, ly), fontsize=3.2 * fs,
+            ax.annotate(str(pad["n"]), (lx, ly), fontsize=nfs,
                         ha=ha, va=va, color="#111111", zorder=7)
+
+    for pad in design["pads"]:
+        cx, cy, w, h = die_pad_mm(pad, die_bb)
+        fill = PAD_COLORS[classify_net(pad["net"])][0]
+        ax.add_patch(Rectangle((cx - w / 2, cy - h / 2), w, h,
+                               facecolor=fill, edgecolor="black", lw=0.25 * fs,
+                               zorder=4))
 
 
 def die_qr_mm(design: dict) -> tuple[float, float, float]:
@@ -825,7 +864,7 @@ def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
     h_mm = design["die_h_um"] / 1000.0
     half = QR_ZOOM_VIEW_MM / 2
     axz.imshow(img, extent=(-w_mm / 2, w_mm / 2, -h_mm / 2, h_mm / 2),
-               origin="upper")
+               origin="upper", interpolation="nearest")
     axz.set_xlim(qx - half, qx + half)
     axz.set_ylim(qy - half, qy + half)
     axz.set_xticks(())
@@ -1018,9 +1057,9 @@ def render_design(design: dict, cob: dict) -> Path:
     with PdfPages(pages_pdf) as pdf:
         for bonding in (False, True):
             fig = build_page(design, cob, bonding)
-            pdf.savefig(fig)
+            pdf.savefig(fig, dpi=PDF_RASTER_DPI)
             tag = "p3" if bonding else "p2"
-            fig.savefig(PAGE_DIR / f"{stem}_{tag}.png", dpi=200)
+            fig.savefig(PAGE_DIR / f"{stem}_{tag}.png", dpi=600)
             plt.close(fig)
 
     page1 = build_pinout_page(design)
@@ -1034,7 +1073,7 @@ def render_design(design: dict, cob: dict) -> Path:
 
     if shutil.which("pdftoppm"):  # p1 preview; p2/p3 save PNGs directly above
         subprocess.run(
-            ["pdftoppm", "-png", "-r", "200", "-f", "1", "-l", "1", "-singlefile",
+            ["pdftoppm", "-png", "-r", "600", "-f", "1", "-l", "1", "-singlefile",
              str(out), str(PAGE_DIR / f"{stem}_p1")], check=True)
     return out
 

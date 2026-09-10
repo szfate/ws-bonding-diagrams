@@ -1,9 +1,10 @@
 """Extract per-design die pad data + two-tone GDS renders from reticle.oas.
 
-Reuses the extraction core of wafer-space-die-pad-diagrams/make_diagrams.py
-by import (same pipeline order as its main(), so numbers match the sibling
-diagrams exactly): pads from layer 37/0, net labels from 81/10 + 53/10,
-peripheral filter, 180° display rotation, CCW numbering from the QR.
+Reuses the extraction core of the vendored make_diagrams.py (originally
+wafer-space-die-pad-diagrams; same pipeline order as its main(), so
+numbers match the sibling diagrams exactly): pads from layer 37/0, net
+labels from 81/10 + 53/10, peripheral filter, 180° display rotation,
+CCW numbering from the QR.
 
 Output coordinates are in the *display frame* — the GDS frame rotated 180°
 so the QR sits top-right — with the origin at the die bbox corner. The die
@@ -23,16 +24,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 from pathlib import Path
 
 import klayout.db as kdb
 
 REPO = Path(__file__).resolve().parent
-sys.path.insert(0, str(REPO.parent / "wafer-space-die-pad-diagrams"))
 
-from make_diagrams import (  # noqa: E402  (sibling repo, path inserted above)
+from make_diagrams import (  # noqa: E402  (vendored, see module docstring)
     OAS,
     _classify_edge,
     _is_peripheral,
@@ -50,6 +49,13 @@ from make_diagrams import (  # noqa: E402  (sibling repo, path inserted above)
 
 DEFAULT_OUT = REPO / "tmp" / "pads.json"
 BG_DIR = REPO / "tmp" / "gds_renders"
+
+# Long-edge pixels for the two-tone die render. The bonding pages show
+# the die ~12x life size, and the placement page's QR zoom inset crops a
+# fixed 0.28 mm window and prints it ~18.5 mm wide — at the sibling
+# repo's 3200 px that inset lands at only ~240 dpi for the largest dies.
+# 8000 px puts the inset at ~600 dpi and the die itself at ~3400 dpi.
+DIE_RENDER_MAX_PX = 8000
 
 # Fast default subset: the PAD_MAPPING.md worked example, the clean
 # reference full-slot design, and the smallest die.
@@ -91,7 +97,8 @@ def extract_design(layout: kdb.Layout, lv, name: str, force: bool) -> dict:
     BG_DIR.mkdir(parents=True, exist_ok=True)
     bg_png = BG_DIR / f"{name}.png"
     if force or not bg_png.exists():
-        render_gds_background(lv, name, layout, die_bb, bg_png)
+        render_gds_background(lv, name, layout, die_bb, bg_png,
+                              max_px=DIE_RENDER_MAX_PX)
         # KLayout renders in GDS-native orientation; rotate to display frame.
         _rotate_image_180(bg_png)
 
