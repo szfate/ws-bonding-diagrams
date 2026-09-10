@@ -64,7 +64,7 @@ from make_diagrams import (  # noqa: E402  (sibling repo, path inserted above)
     classify_net,
 )
 from plot_pcb import CLASS_COLORS, centered_rect, net_class  # noqa: E402
-from verify_mapping import EXTRA_PCB_PADS  # noqa: E402
+from verify_mapping import extra_pads  # noqa: E402
 
 DEFAULT_PADS = REPO / "tmp" / "pads.json"
 DEFAULT_COB = REPO / "tmp" / "cob" / "1x1.json"
@@ -176,6 +176,16 @@ def cjk_families() -> list[str]:
 
 
 CJK_FAMILIES = cjk_families()
+
+def board_extras(cob: dict) -> set[str]:
+    """Mechanical/non-bond pads on this board (paddle + thru-holes).
+
+    Board-specific: the run-1 boards number the extras 75..81, TQVA 57..63.
+    Stored per-board in the JSON as "extra_nums"; legacy exports (1x1)
+    without the field fall back to the run-1 set.
+    """
+    return set(cob.get("extra_nums") or {"75", "76", "77", "78", "79", "80", "81"})
+
 
 # Wires land on the die-side edge of the PCB pad (real bonds land near
 # the inner edge, and the center-set pad number stays legible), pushed
@@ -440,7 +450,8 @@ def _draw_shapes(ax: plt.Axes, shapes: list, style: dict, zorder: float,
                                      closed=True, fill=False, zorder=zorder, **call_style))
 
 
-def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) -> None:
+def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True,
+               extras: set[str] = frozenset()) -> None:
     """COB furniture: substrate, front copper, mask opening, bond pads.
 
     Front-layer view: soldermask substrate, muted F.Cu traces/pour/vias
@@ -476,7 +487,7 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
     stitch_vias = [{"x_mm": p["gx_mm"], "y_mm": p["gy_mm"],
                     "size_mm": p["size_mm"][0], "drill_mm": p.get("drill_mm")}
                    for p in cob["pads"]
-                   if p["num"] in EXTRA_PCB_PADS and p["shape"] == "circle"]
+                   if p["num"] in extras and p["type"] == "thru_hole"]
     pour_pts = [p["pts"] for p in cob.get("zone_polygons", [])
                 if p["layer"] == "F.Cu"]
     for pts in pour_pts:
@@ -611,20 +622,19 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
                  dict(color=PCB_STYLE["silk"]), zorder=3, cob=cob,
                  pt_per_mm=pt_per_mm, outline_only=("rect",))
 
-    # Bond pads: gold ENIG ring with a class-colored rim, GND extras
-    # (paddle) dashed-outlined; the GND stitches (76-81) are thru-holes,
-    # drawn with the vias above.
+    # Bond pads: gold ENIG ring with a class-colored rim; the mechanical
+    # extras (paddle + mounting thru-holes) are drawn dashed / as holes.
     frot = cob["padring"]["rot_deg"]
     for pad in cob["pads"]:
         x, y = to_plot(cob, pad["gx_mm"], pad["gy_mm"])
         w, h = pad["size_mm"]
         cls = CLASS_COLORS[net_class(pad)]
-        if pad["num"] in EXTRA_PCB_PADS and pad["shape"] == "circle":
-            continue
+        if pad["num"] in extras and pad["type"] == "thru_hole":
+            continue  # drawn with the vias above
         # Drawn rotation: KiCad pad rot is CCW on screen (relative to the
         # footprint), so the plot-frame angle is footprint + pad rot.
         poly = centered_rect(x, y, w, h, (frot + pad["rot_deg"]) % 360)
-        if pad["num"] in EXTRA_PCB_PADS:
+        if pad["num"] in extras:
             poly.set_facecolor("none")
             poly.set_edgecolor(PCB_STYLE["pad"])
             poly.set_linestyle("--")
@@ -635,7 +645,7 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True) ->
             poly.set_linewidth(1.0 * fs)
         poly.set_zorder(4)
         ax.add_patch(poly)
-        if show_numbers and pad["num"] not in EXTRA_PCB_PADS:
+        if show_numbers and pad["num"] not in extras:
             # Diagram numbering matches the die (0-based); physical PCB
             # pads are +1 (see the page footer note).
             ax.annotate(str(int(pad["num"]) - 1), (x, y), fontsize=4.2 * fs,
@@ -722,25 +732,41 @@ def board_rocket_mm(cob: dict) -> tuple[float, float, float] | None:
 def qr_fiducial_target(cob: dict) -> dict | None:
     """What the die QR aligns to on this board, plot-frame mm + callout text.
 
-    The padring footprint's own F.Cu circle is the QR-alignment marker
-    next to pad 0 (0.5x1 board — its rocket sits in the opposite corner
-    by design). Boards without one align to the rocket logo.
+    boards.json declares the convention (qr_alignment on the parsed JSON:
+    "copper-circle" = the padring footprint's F.Cu circle next to pad 0,
+    "rocket" = the board's rocket logo); the geometry is derived here as
+    before and must match the declaration — a mismatch means the kicad
+    file or boards.json drifted, and the factory-facing callout must not
+    silently change.
     """
+    declared = cob.get("qr_alignment")
+    target = None
     for s in cob["graphics"].get("F.Cu", []):
         if s.get("type") == "circle" and "center" in s:
             cx, cy = local_to_plot(cob, *s["center"])
             ex, ey = local_to_plot(cob, *s["end"])
-            return {"cx": cx, "cy": cy, "r": math.hypot(ex - cx, ey - cy) + 0.25,
-                    "note": FIDUCIAL_NOTE_CIRCLE, "note_zh": FIDUCIAL_NOTE_CIRCLE_ZH,
-                    "label": CIRCLE_LABEL, "label_zh": CIRCLE_LABEL_ZH,
-                    "anchor": "left"}
-    rocket = board_rocket_mm(cob)
-    if rocket is None:
+            target = {"kind": "copper-circle", "cx": cx, "cy": cy,
+                      "r": math.hypot(ex - cx, ey - cy) + 0.25,
+                      "note": FIDUCIAL_NOTE_CIRCLE, "note_zh": FIDUCIAL_NOTE_CIRCLE_ZH,
+                      "label": CIRCLE_LABEL, "label_zh": CIRCLE_LABEL_ZH,
+                      "anchor": "left"}
+            break
+    if target is None:
+        rocket = board_rocket_mm(cob)
+        if rocket is not None:
+            rx, ry, rr = rocket
+            target = {"kind": "rocket", "cx": rx, "cy": ry, "r": rr,
+                      "note": FIDUCIAL_NOTE_ROCKET, "note_zh": FIDUCIAL_NOTE_ROCKET_ZH,
+                      "label": ROCKET_LABEL, "label_zh": ROCKET_LABEL_ZH}
+    if target is None:
         return None
-    rx, ry, rr = rocket
-    return {"cx": rx, "cy": ry, "r": rr,
-            "note": FIDUCIAL_NOTE_ROCKET, "note_zh": FIDUCIAL_NOTE_ROCKET_ZH,
-            "label": ROCKET_LABEL, "label_zh": ROCKET_LABEL_ZH}
+    if declared and declared != target["kind"]:
+        raise SystemExit(
+            f"board {cob.get('board', cob['source'])}: boards.json declares "
+            f"qr_alignment={declared!r} but the geometry shows "
+            f"{target['kind']!r} — the kicad file or the knowledgebase "
+            f"drifted")
+    return target
 
 
 def draw_fiducials(ax: plt.Axes, cob: dict, fs: float, y_top: float,
@@ -829,7 +855,7 @@ def wire_segments(design: dict, cob: dict):
     die_bb = design["die_bb_um"]
     frot = cob["padring"]["rot_deg"]
     die_pads = {p["n"]: p for p in design["pads"]}
-    ring = sorted((p for p in cob["pads"] if p["num"] not in EXTRA_PCB_PADS),
+    ring = sorted((p for p in cob["pads"] if p["num"] not in board_extras(cob)),
                   key=lambda p: int(p["num"]))
 
     segments, lengths = [], []
@@ -917,7 +943,7 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     die_classes = sorted({classify_net(p["net"]) for p in design["pads"]},
                          key=list(DIE_CLASS_LABELS).index)
     pcb_classes = sorted({net_class(p) for p in cob["pads"]
-                          if p["num"] not in EXTRA_PCB_PADS},
+                          if p["num"] not in board_extras(cob)},
                          key=list(CLASS_COLORS).index)
 
     pw, ph = A4_W_IN, A4_H_IN
@@ -935,7 +961,7 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     ax.set_ylim(y0 - 1.2, y1 + 2.2)
 
     img = mpimg.imread(REPO / design["bg_png"])
-    draw_board(ax, cob, fs)
+    draw_board(ax, cob, fs, extras=board_extras(cob))
     draw_die(ax, design, fs, img=img)
     lengths = []
     if bonding:
@@ -1017,10 +1043,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--designs", nargs="*", default=DEFAULT_DESIGNS,
                     help="design cell names (default: WSLG)")
+    ap.add_argument("--board", help="board id in boards.json — shorthand "
+                                    "for --cob tmp/cob/<board>.json")
     ap.add_argument("--pads", type=Path, default=DEFAULT_PADS)
     ap.add_argument("--cob", type=Path, default=DEFAULT_COB)
     args = ap.parse_args()
 
+    if args.board:
+        args.cob = REPO / "tmp" / "cob" / f"{args.board}.json"
     cob = json.loads(args.cob.read_text())
     designs = json.loads(args.pads.read_text())
     if args.designs:
@@ -1028,7 +1058,7 @@ def main() -> None:
     if not designs:
         raise SystemExit("no matching designs in tmp/pads.json — run extract_dies.py first")
 
-    ring = [p for p in cob["pads"] if p["num"] not in EXTRA_PCB_PADS]
+    ring = [p for p in cob["pads"] if p["num"] not in board_extras(cob)]
     # Die must physically fit the board's die site: the smallest F.Mask
     # opening rect is the cavity the die drops into. Pad count alone
     # can't catch the wrong board — the 1x0.5 and 0.5x1 rings both have

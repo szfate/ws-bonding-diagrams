@@ -1,0 +1,48 @@
+{
+  "boards": {
+    "1x1": {
+      "git": "git@github.com:wafer-space/chip-on-board-wire-bonded-pcbs.git",
+      "rev": "90fc89d65ef5ee5d9beb64b12b9cc8fa4ced7f08",
+      "pcb": "run-1/1x1-cob/1x1-mezzanine.kicad_pcb",
+      "slot": "1x1",
+      "designs": [],
+      "ring_count": 74,
+      "extra_nums": ["75", "76", "77", "78", "79", "80", "81"],
+      "qr_alignment": "rocket",
+      "die_site_mm": [9.4, 10.23]
+    },
+    "1x0p5": {
+      "git": "git@github.com:wafer-space/chip-on-board-wire-bonded-pcbs.git",
+      "rev": "90fc89d65ef5ee5d9beb64b12b9cc8fa4ced7f08",
+      "pcb": "run-1/1x0p5-cob/mezzanine-1x0p5.kicad_pcb",
+      "slot": "1x0.5",
+      "designs": [],
+      "ring_count": 72,
+      "extra_nums": ["75", "76", "77", "78", "79", "80", "81"],
+      "qr_alignment": "rocket",
+      "die_site_mm": [4.2, 2.8]
+    },
+    "0p5x1": {
+      "git": "git@github.com:wafer-space/chip-on-board-wire-bonded-pcbs.git",
+      "rev": "90fc89d65ef5ee5d9beb64b12b9cc8fa4ced7f08",
+      "pcb": "run-1/0p5x1-cob/mezzanine-0p5x1.kicad_pcb",
+      "slot": "0.5x1",
+      "designs": [],
+      "ring_count": 72,
+      "extra_nums": ["75", "76", "77", "78", "79", "80", "81"],
+      "qr_alignment": "copper-circle",
+      "die_site_mm": [2.5, 5.5]
+    },
+    "tqva": {
+      "git": "git@github.com:wafer-space/chip-on-board-wire-bonded-pcbs.git",
+      "rev": "90fc89d65ef5ee5d9beb64b12b9cc8fa4ced7f08",
+      "pcb": "run-1/tqva-cob/tqva-cob.kicad_pcb",
+      "slot": "0.5x0.5",
+      "designs": [],
+      "ring_count": 56,
+      "extra_nums": ["57", "58", "59", "60", "61", "62", "63"],
+      "qr_alignment": "copper-circle",
+      "die_site_mm": [2.5, 3.2]
+    }
+  }
+}

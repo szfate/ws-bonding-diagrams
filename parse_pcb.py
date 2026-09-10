@@ -12,7 +12,8 @@ Callers must negate y before plotting in a math-up frame (see
 PAD_MAPPING.md §4 in wafer-space-die-pad-diagrams for the full trap).
 
 Usage:
-    uv run parse_pcb.py [--pcb PATH] [--out PATH]
+    uv run parse_pcb.py --board tqva [--allow-dirty]
+    uv run parse_pcb.py [--pcb PATH] [--out PATH]     # manual, no boards.json
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import argparse
 import json
 import math
 from pathlib import Path
+
+from boards import fetch_pcb, load_boards, resolve_board
 
 REPO = Path(__file__).resolve().parent
 DEFAULT_PCB = REPO.parent / "chip-on-board-wire-bonded-pcbs" / "run-1" / "1x1-cob" / "1x1-mezzanine.kicad_pcb"
@@ -349,17 +352,79 @@ def extract(pcb_path: Path) -> dict:
     }
 
 
+def cavity_mm(data: dict) -> tuple[float, float] | None:
+    """Smallest axis-aligned F.Mask opening rect, (w, h) mm — the die site
+    the placement guard fits die sizes against."""
+    cavity = None
+    for s in data["graphics"].get("F.Mask", []):
+        if s["type"] == "rect" and "start" in s:
+            w = abs(s["end"][0] - s["start"][0])
+            h = abs(s["end"][1] - s["start"][1])
+            if cavity is None or w * h < cavity[0] * cavity[1]:
+                cavity = (w, h)
+    return cavity
+
+
+def apply_board_facts(data: dict, board_id: str, entry: dict,
+                      meta: dict) -> None:
+    """Stamp boards.json facts onto the parse and assert they still hold.
+
+    ring_count and die_site_mm are pinned expectations, not inputs: the
+    kicad file is the source of truth for geometry, so a mismatch means
+    the board drifted from what the knowledgebase (and prior diagrams)
+    were built against — fail loudly instead of rendering a wrong page.
+    """
+    extras = sorted(entry["extra_nums"], key=int)
+    ring = [p for p in data["pads"] if p["num"] not in set(extras)]
+    if len(ring) != entry["ring_count"]:
+        raise SystemExit(
+            f"board {board_id}: ring has {len(ring)} bond pads, boards.json "
+            f"pins {entry['ring_count']} — the kicad file drifted from the "
+            f"knowledgebase")
+    cavity = cavity_mm(data)
+    if cavity:
+        dw, dh = entry["die_site_mm"]
+        if abs(cavity[0] - dw) > 0.05 or abs(cavity[1] - dh) > 0.05:
+            raise SystemExit(
+                f"board {board_id}: die site is {cavity[0]:.2f}x"
+                f"{cavity[1]:.2f} mm, boards.json pins {dw}x{dh} — "
+                f"the kicad file drifted from the knowledgebase")
+    data["board"] = board_id
+    data["rev"] = meta["rev"]
+    data["dirty"] = meta["dirty"]
+    data["extra_nums"] = extras
+    data["qr_alignment"] = entry["qr_alignment"]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--pcb", type=Path, default=DEFAULT_PCB)
+    ap.add_argument("--board", help="board id in boards.json (fetches the "
+                                    "pinned kicad_pcb, asserts ring/die-site)")
+    ap.add_argument("--allow-dirty", action="store_true",
+                    help="render from a locally-dirty board file anyway "
+                         "(outputs flagged untraced)")
+    ap.add_argument("--pcb", type=Path, default=DEFAULT_PCB,
+                    help="manual mode: kicad_pcb path (ignores boards.json)")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = ap.parse_args()
 
+    if args.board:
+        board_id, entry = resolve_board(load_boards(), board=args.board)
+        args.pcb, meta = fetch_pcb(entry, allow_dirty=args.allow_dirty)
+        if args.out == DEFAULT_OUT:
+            args.out = REPO / "tmp" / "cob" / f"{board_id}.json"
+
     data = extract(args.pcb)
     args.out.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.board:
+        apply_board_facts(data, board_id, entry, meta)
+
     args.out.write_text(json.dumps(data, indent=1))
 
-    ring = [p for p in data["pads"] if p["num"] not in {"75", "76", "77", "78", "79", "80", "81"}]
+    extras = set(data.get("extra_nums") or
+                 {"75", "76", "77", "78", "79", "80", "81"})
+    ring = [p for p in data["pads"] if p["num"] not in extras]
     nets: dict[str, int] = {}
     for p in ring:
         nets[p.get("pinfunction", "?").rsplit("_", 1)[0]] = nets.get(p.get("pinfunction", "?").rsplit("_", 1)[0], 0) + 1
@@ -369,6 +434,11 @@ def main() -> None:
     print(f"graphic layers: { {k: len(v) for k, v in data['graphics'].items()} }")
     print(f"edge_cuts shapes: {len(data['edge_cuts'])}")
     print(f"other footprints: {len(data['other_footprints'])}")
+    if args.board:
+        trace = f"rev {meta['rev'][:10]}"
+        if meta["dirty"]:
+            trace += " (DIRTY — untraced)"
+        print(f"board {board_id}: {trace}")
     print(f"wrote {args.out}")
 
 

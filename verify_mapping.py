@@ -39,7 +39,15 @@ WIRE_MIN_MM = 1.0
 WIRE_MAX_MM = 3.0
 WIRE_MAX_ANGLE_DEG = 45.0
 
-EXTRA_PCB_PADS = {"75", "76", "77", "78", "79", "80", "81"}
+# Mechanical/non-bond pads beyond the bond ring — excluded from ring pairing
+# and numbering on every page. Extra-pad numbers are board-family specific
+# (run-1 boards: paddle 75 + GND thru-holes 76-81; TQVA: paddle 57 + mounts
+# 58-63), so the shared filter is positional: the bond ring is pads numbered
+# 1..N, and a board's ring size N is the die's pad count (die pad count ==
+# ring count is enforced before any pairing). Board-specific sets are pinned
+# in boards.json and stamped onto each parsed JSON as "extra_nums".
+def extra_pads(cob: dict) -> set[str]:
+    return set(cob.get("extra_nums", []))
 
 
 def die_pad_to_pcb_mm(pad: dict, die_bb: list[float]) -> tuple[float, float]:
@@ -88,7 +96,7 @@ def verify_design(design: dict, cob: dict) -> list[str]:
     issues: list[str] = []
     die_bb = design["die_bb_um"]
     die_pads = {p["n"]: p for p in design["pads"]}
-    ring = sorted((p for p in cob["pads"] if p["num"] not in EXTRA_PCB_PADS),
+    ring = sorted((p for p in cob["pads"] if p["num"] not in extra_pads(cob)),
                   key=lambda p: int(p["num"]))
 
     if len(die_pads) != len(ring):
@@ -191,7 +199,7 @@ def verify_design(design: dict, cob: dict) -> list[str]:
 def plot_design(design: dict, cob: dict, out: Path) -> None:
     die_bb = design["die_bb_um"]
     die_pads = {p["n"]: p for p in design["pads"]}
-    ring = sorted((p for p in cob["pads"] if p["num"] not in EXTRA_PCB_PADS),
+    ring = sorted((p for p in cob["pads"] if p["num"] not in extra_pads(cob)),
                   key=lambda p: int(p["num"]))
 
     fig, ax = plt.subplots(figsize=(8, 9))
