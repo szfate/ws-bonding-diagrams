@@ -43,6 +43,20 @@
       "extra_nums": ["57", "58", "59", "60", "61", "62", "63"],
       "qr_alignment": "copper-circle",
       "die_site_mm": [2.5, 3.2]
+    },
+    "mosb": {
+      "git": "https://github.com/mosbiuschip/WaferSpace_COB_70pins.git",
+      "rev": "eb19b49c88facc1c721b5cbbb9ae65dc28cb5fb0",
+      "pcb": "V3_COB_Original/V3_COB_Original/V3_COB_Original.kicad_pcb",
+      "padring_fp": "MOSBius_V2_CHIP:waferspace_default_padring_v0.2",
+      "edge_cuts_layer": "User.4",
+      "designs": ["MOSB_chip_top_4_0", "MOSB_chip_top_4_2"],
+      "ring_count": 74,
+      "extra_nums": ["75", "76", "77", "78", "79", "80", "81"],
+      "qr_alignment": "rocket",
+      "die_site_mm": [4.0, 5.2],
+      "die_site_pad": "75",
+      "ring_map": {"offset": 17}
     }
   }
 }

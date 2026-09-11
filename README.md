@@ -84,6 +84,22 @@ asserts ring count and die site against the parsed geometry, so a
 drifted board file fails loudly; pad-count and cavity guards in
 `make_bonding_diagrams.py` route each die to its only compatible board.
 
+Third-party boards (any entry whose `git` isn't the wafer-space board
+repo) carry a few extra pins:
+
+- `padring_fp` — the padring footprint's exact lib id, since the
+  `*padring*` name heuristic doesn't apply.
+- `edge_cuts_layer` — outline fallback when the file draws the board
+  shape on a user layer instead of Edge.Cuts.
+- `ring_map` — a bond-map correction for rings whose numbering doesn't
+  follow `pcb_pad = die_pad + 1`: `{"offset": N}` bonds pcb pad `i` to
+  die pad `(i-1+N) mod ring`. Both MOSB boards (round and rectangular)
+  use offset 17 — confirmed against the author's Cmts.User wire guides
+  (median endpoint error ~0.15 mm, zero wire crossings).
+- `wire_max_mm` / `wire_max_angle_deg` — per-board wire-bond limits
+  stamped onto the parse; verify_mapping checks against them instead of
+  the rectangular-board defaults (1–3 mm, 45°).
+
 ## Pad correspondence
 
 `pcb_pad = die_pad + 1`: both rings number counter-clockwise from the
@@ -93,7 +109,9 @@ and rotation warnings live in
 `wafer-space-die-pad-diagrams/PAD_MAPPING.md` — read it before debugging
 any off-by-one or flipped wire. `verify_mapping.py` re-checks the
 mapping geometrically per board (pad counts, per-pad distances, wire
-angles) and fails loudly on mismatch.
+angles) and fails loudly on mismatch. Boards with a pinned `ring_map`
+(see above) deviate from the `+1` convention on purpose — their pairing
+is `ring_map`-ordered.
 
 ## How to run
 

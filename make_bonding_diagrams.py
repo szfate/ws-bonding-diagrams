@@ -64,7 +64,7 @@ from make_diagrams import (  # noqa: E402  (vendored, see its module header)
 )
 from plot_pcb import CLASS_COLORS, centered_rect, net_class  # noqa: E402
 from verify_mapping import extra_pads  # noqa: E402
-from boards import find_pads  # noqa: E402
+from boards import find_pads, load_boards  # noqa: E402
 
 DEFAULT_COB = REPO / "tmp" / "cob" / "1x1.json"
 OUT_DIR = REPO / "bonding-diagrams"
@@ -448,21 +448,54 @@ def data_pt_per_mm(ax: plt.Axes) -> float:
     return bb.width / (x1 - x0) * 72.0 / fig.dpi
 
 
+def _arc_points(start: tuple, mid: tuple, end: tuple, n: int = 33) -> list:
+    """Sample an arc through three plot-frame points, sweeping the way the
+    mid point lies (KiCad arcs are defined by start/mid/end with no explicit
+    direction). Returned as n (x, y) points."""
+
+    def circumcenter(p1, p2, p3):
+        d = 2 * (p1[0] * (p2[1] - p3[1]) + p2[0] * (p3[1] - p1[1])
+                 + p3[0] * (p1[1] - p2[1]))
+        ux = ((p1[0]**2 + p1[1]**2) * (p2[1] - p3[1])
+              + (p2[0]**2 + p2[1]**2) * (p3[1] - p1[1])
+              + (p3[0]**2 + p3[1]**2) * (p1[1] - p2[1])) / d
+        uy = ((p1[0]**2 + p1[1]**2) * (p3[0] - p2[0])
+              + (p2[0]**2 + p2[1]**2) * (p1[0] - p3[0])
+              + (p3[0]**2 + p3[1]**2) * (p2[0] - p1[0])) / d
+        return ux, uy
+
+    ux, uy = circumcenter(start, mid, end)
+    r = math.hypot(start[0] - ux, start[1] - uy)
+    a1 = math.atan2(start[1] - uy, start[0] - ux)
+    a_mid = (math.atan2(mid[1] - uy, mid[0] - ux) - a1) % (2 * math.pi)
+    a_end = (math.atan2(end[1] - uy, end[0] - ux) - a1) % (2 * math.pi)
+    # Sweep CCW to end only if mid lies on the CCW half of that path —
+    # otherwise the arc goes clockwise past mid the other way around.
+    sweep = a_end if a_mid <= a_end else a_end - 2 * math.pi
+    return [(ux + r * math.cos(a1 + sweep * i / (n - 1)),
+             uy + r * math.sin(a1 + sweep * i / (n - 1)))
+            for i in range(n)]
+
+
 def _draw_shapes(ax: plt.Axes, shapes: list, style: dict, zorder: float,
                  cob: dict | None = None,
                  pt_per_mm: float | None = None,
-                 outline_only: tuple = ()) -> None:
-    """Outline-style graphics (line/rect/poly/circle) in global mm.
+                 outline_only: tuple = (),
+                 xf=None) -> None:
+    """Outline-style graphics (line/rect/poly/circle/arc) in global mm.
 
     With pt_per_mm, each shape's own KiCad stroke width is drawn true to
     scale; otherwise the linewidth in `style` is used as-is. Shapes KiCad
     marks fill=yes (e.g. the logo's silk artwork) are drawn filled with
     the style color and no edge — except `outline_only` types, which
     always draw as outlines (the fab's serial-number marking box is
-    fill=yes in KiCad but is a placeholder frame, not painted silk).
+    fill=yes in KiCad but is a placeholder frame, not painted silk). `xf`
+    overrides the point transform (footprint-local graphics).
     """
 
     def pt(p: tuple) -> tuple:
+        if xf:
+            return xf(p)
         return to_plot(cob, *p) if cob else (p[0], -p[1])
 
     for shape in shapes:
@@ -493,10 +526,28 @@ def _draw_shapes(ax: plt.Axes, shapes: list, style: dict, zorder: float,
             else:
                 ax.add_patch(Polygon([pt(p) for p in shape["pts"]],
                                      closed=True, fill=False, zorder=zorder, **call_style))
+        elif shape["type"] == "circle" and "center" in shape:
+            (cx, cy) = pt(shape["center"])
+            (ex, ey) = pt(shape["end"])
+            r = math.hypot(ex - cx, ey - cy)
+            if filled:
+                ax.add_patch(Circle((cx, cy), r,
+                                    facecolor=call_style.pop("color"),
+                                    edgecolor="none", zorder=zorder,
+                                    **call_style))
+            else:
+                ax.add_patch(Circle((cx, cy), r, fill=False,
+                                    zorder=zorder, **call_style))
+        elif shape["type"] == "arc" and "mid" in shape:
+            pts = _arc_points(pt(shape["start"]), pt(shape["mid"]),
+                              pt(shape["end"]))
+            ax.plot([p[0] for p in pts], [p[1] for p in pts],
+                    zorder=zorder, **call_style)
 
 
 def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True,
-               extras: set[str] = frozenset()) -> None:
+               extras: set[str] = frozenset(),
+               bond_labels: dict[str, str] | None = None) -> None:
     """COB furniture: substrate, front copper, mask opening, bond pads.
 
     Front-layer view: soldermask substrate, muted F.Cu traces/pour/vias
@@ -658,6 +709,12 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True,
                                  closed=True, facecolor=PCB_STYLE["cu"],
                                  edgecolor="none", zorder=2.5))
 
+    # Padring-footprint silk (filled corner dot, edge marks) — footprint-
+    # local like the copper above; MOSB's board is the first with any.
+    _draw_shapes(ax, cob["graphics"].get("F.SilkS", []),
+                 dict(color=PCB_STYLE["silk"]), zorder=3, pt_per_mm=pt_per_mm,
+                 xf=lambda p: local_to_plot(cob, *p), outline_only=("rect",))
+
     # Board silkscreen (pin-1 marker, marking box) — global board frame,
     # unlike the footprint-local graphics above; strokes at their KiCad
     # widths. The marking box reserves space for the fab's serial number,
@@ -691,9 +748,11 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True,
         poly.set_zorder(4)
         ax.add_patch(poly)
         if show_numbers and pad["num"] not in extras:
-            # Diagram numbering matches the die (0-based); physical PCB
-            # pads are +1 (see the page footer note).
-            ax.annotate(str(int(pad["num"]) - 1), (x, y), fontsize=4.2 * fs,
+            # Diagram numbering matches the die: the wafer-space boards
+            # label physical pad N with die pad N-1; boards with a pinned
+            # ring_map label each pad with the die pad it actually bonds.
+            ax.annotate(bond_labels[pad["num"]] if bond_labels else
+                        str(int(pad["num"]) - 1), (x, y), fontsize=4.2 * fs,
                         ha="center", va="center", color=PCB_STYLE["pad_num"],
                         zorder=7)
 
@@ -911,6 +970,9 @@ def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
 def wire_segments(design: dict, cob: dict):
     """Wire fan: die pad n → COB pad n (physical pad n+1), die-pad-edge start.
 
+    Boards with a pinned ring_map (stamped by parse_pcb) bond a different
+    die pad per COB pad — the map wins over the +1 convention.
+
     Returns (segments, lengths) in plot-frame mm. Wires are drawn in a
     single color — class-colored wires blended into the die/PCB palette.
     """
@@ -919,10 +981,11 @@ def wire_segments(design: dict, cob: dict):
     die_pads = {p["n"]: p for p in design["pads"]}
     ring = sorted((p for p in cob["pads"] if p["num"] not in board_extras(cob)),
                   key=lambda p: int(p["num"]))
+    ring_map = cob.get("ring_map")
 
     segments, lengths = [], []
-    for pcb in ring:
-        dp = die_pads.get(int(pcb["num"]) - 1)
+    for i, pcb in enumerate(ring):
+        dp = die_pads.get(ring_map[i] if ring_map else int(pcb["num"]) - 1)
         if dp is None:
             continue
         cx, cy, w, h = die_pad_mm(dp, die_bb)
@@ -1023,7 +1086,15 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     ax.set_ylim(y0 - 1.2, y1 + 2.2)
 
     img = mpimg.imread(REPO / design["bg_png"])
-    draw_board(ax, cob, fs, extras=board_extras(cob))
+    # Bond labels: ring_map boards get the die pad each COB pad bonds to;
+    # the convention boards label physical pad N with die pad N-1.
+    ring_map = cob.get("ring_map")
+    bond_labels = None
+    if ring_map:
+        ring = sorted((p for p in cob["pads"] if p["num"] not in board_extras(cob)),
+                      key=lambda p: int(p["num"]))
+        bond_labels = {p["num"]: str(ring_map[i]) for i, p in enumerate(ring)}
+    draw_board(ax, cob, fs, extras=board_extras(cob), bond_labels=bond_labels)
     draw_die(ax, design, fs, img=img)
     lengths = []
     if bonding:
@@ -1137,18 +1208,41 @@ def main() -> None:
                          "— run extract_dies.py first")
 
     ring = [p for p in cob["pads"] if p["num"] not in board_extras(cob)]
-    # Die must physically fit the board's die site: the smallest F.Mask
-    # opening rect is the cavity the die drops into. Pad count alone
-    # can't catch the wrong board — the 1x0.5 and 0.5x1 rings both have
-    # 72 pads; only the cavity shape differs (wide vs tall).
-    cavity = None
-    for s in cob["graphics"].get("F.Mask", []):
-        if s["type"] == "rect" and "start" in s:
-            w = abs(s["end"][0] - s["start"][0])
-            h = abs(s["end"][1] - s["start"][1])
-            if cavity is None or w * h < cavity[0] * cavity[1]:
-                cavity = (w, h)
+    # Die must physically fit the board's die site: parse stamps the
+    # asserted boards.json site; fall back to the smallest F.Mask opening
+    # rect (the cavity the die drops into) for un-stamped COB JSONs. Pad
+    # count alone can't catch the wrong board — the 1x0.5 and 0.5x1 rings
+    # both have 72 pads; only the cavity shape differs (wide vs tall).
+    site = cob.get("die_site_mm")
+    if site:
+        cavity = (site[0], site[1])
+    else:
+        cavity = None
+        for s in cob["graphics"].get("F.Mask", []):
+            if s["type"] == "rect" and "start" in s:
+                w = abs(s["end"][0] - s["start"][0])
+                h = abs(s["end"][1] - s["start"][1])
+                if cavity is None or w * h < cavity[0] * cavity[1]:
+                    cavity = (w, h)
+    # Knowledgebase routing: a die claimed by name in another board's
+    # "designs" renders only there; otherwise only the board serving its
+    # slot may take it. Geometry alone can't disambiguate overlapping
+    # boards (MOSB's 74-pad die fits the 1x1 site too).
+    boards_kb = load_boards()
+    this_board = cob.get("board")
     for design in designs:
+        claims = [bid for bid, e in boards_kb.items()
+                  if design["name"] in e.get("designs", ())]
+        if claims and this_board not in claims:
+            print(f"SKIP {design['name']}: claimed by board {claims[0]}")
+            continue
+        if not claims:
+            slot_claims = [bid for bid, e in boards_kb.items()
+                           if e.get("slot") == design["slot_size"]]
+            if slot_claims and this_board not in slot_claims:
+                print(f"SKIP {design['name']}: slot {design['slot_size']} "
+                      f"served by board {slot_claims[0]}")
+                continue
         if len(design["pads"]) != len(ring):
             print(f"SKIP {design['name']}: pad count mismatch "
                   f"(die {len(design['pads'])} vs COB {len(ring)})")

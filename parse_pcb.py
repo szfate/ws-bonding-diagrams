@@ -173,6 +173,10 @@ def parse_pad(pad: list) -> dict:
         out["drill_mm"] = float(drill[1])
     if net:
         out["net_num"] = as_float(net[1])
+        # (net 55 "GND") — the bare number lands in "net"; keep the name
+        # too for boards whose pinfunctions don't carry a net class.
+        if len(net) > 2 and isinstance(net[2], str):
+            out["net_name"] = net[2]
     return out
 
 
@@ -234,7 +238,10 @@ def footprint_summary(fp: list) -> dict:
     return {"lib_id": lib_id, "reference": ref, "at_mm": [x, y], "rot_deg": rot}
 
 
-def extract(pcb_path: Path) -> dict:
+def extract(pcb_path: Path, padring_fp: str | None = None) -> dict:
+    """Parse the board; padring_fp pins which footprint is the bond ring
+    (boards.json "padring_fp" for third-party boards — the wafer-space
+    ones all name theirs *padring*)."""
     text = pcb_path.read_text()
     root = parse_sexp(text)
 
@@ -246,7 +253,9 @@ def extract(pcb_path: Path) -> dict:
 
     for fp in _find_all(root, "footprint"):
         summary = footprint_summary(fp)
-        if PADRING_LIB_ID in summary["lib_id"]:
+        is_padring = summary["lib_id"] == padring_fp if padring_fp \
+            else PADRING_LIB_ID in summary["lib_id"]
+        if is_padring:
             padring_summary = summary
             fx, fy, frot = summary["at_mm"] + [summary["rot_deg"]]
             for pad in children(fp, "pad"):
@@ -284,6 +293,10 @@ def extract(pcb_path: Path) -> dict:
                                 for lx, ly in g["pts"]]
                 board_graphics.setdefault(g["layer"], []).append(g)
             other_footprints.append(summary)
+
+    if padring_summary is None:
+        raise SystemExit(f"{pcb_path.name}: no padring footprint found "
+                         f"(looked for {padring_fp or '*' + PADRING_LIB_ID + '*'})")
 
     edge_cuts = []
     for g_node in _find_all(root, "gr_line") + _find_all(root, "gr_rect") + \
@@ -381,14 +394,62 @@ def apply_board_facts(data: dict, board_id: str, entry: dict,
             f"board {board_id}: ring has {len(ring)} bond pads, boards.json "
             f"pins {entry['ring_count']} — the kicad file drifted from the "
             f"knowledgebase")
-    cavity = cavity_mm(data)
+    dw, dh = entry["die_site_mm"]
+    if not data["edge_cuts"] and entry.get("edge_cuts_layer"):
+        # Some third-party boards draw the outline on a user layer instead
+        # of Edge.Cuts (V3_COB_Original keeps it on User.4) — those shapes
+        # landed in board_graphics during extract; promote them.
+        shapes = [g for g in data["board_graphics"].get(
+                      entry["edge_cuts_layer"], [])]
+        if shapes:
+            data["edge_cuts"] = shapes
+            del data["board_graphics"][entry["edge_cuts_layer"]]
+    if entry.get("die_site_pad"):
+        # Boards whose F.Mask opening spans the whole padring (not just
+        # the die) pin the die paddle pad instead — largest pad sharing
+        # the pad number (the paddle, not its mounting holes).
+        cands = [p for p in data["pads"]
+                 if p["num"] == entry["die_site_pad"] and p.get("size_mm")]
+        if not cands:
+            raise SystemExit(
+                f"board {board_id}: no pad numbered {entry['die_site_pad']!r} "
+                f"— the kicad file drifted from the knowledgebase")
+        w, h = max(cands, key=lambda p: p["size_mm"][0] * p["size_mm"][1])["size_mm"]
+        cavity = (w, h)
+    else:
+        cavity = cavity_mm(data)
     if cavity:
-        dw, dh = entry["die_site_mm"]
         if abs(cavity[0] - dw) > 0.05 or abs(cavity[1] - dh) > 0.05:
             raise SystemExit(
                 f"board {board_id}: die site is {cavity[0]:.2f}x"
                 f"{cavity[1]:.2f} mm, boards.json pins {dw}x{dh} — "
                 f"the kicad file drifted from the knowledgebase")
+    # Stamp the asserted site so renderers guard against it directly
+    # instead of re-deriving (the derivation misses paddle-only boards).
+    data["die_site_mm"] = [dw, dh]
+    if entry.get("ring_map"):
+        # Per-board bond map for rings whose numbering doesn't follow the
+        # pcb_pad = die_pad + 1 convention. MOSB's round staggered ring:
+        # every pcb pad N bonds die pad (N-1+offset) mod ring (offset 17
+        # matches the author's Cmts.User wire guides to <0.5 mm and is
+        # crossing-free). Resolved to an explicit ring-ordered permutation
+        # and stamped; verify_mapping re-checks the geometry per die.
+        rm = entry["ring_map"]
+        n_ring = len(ring)
+        mapped = [
+            (int(p["num"]) - 1 + rm["offset"]) % n_ring
+            for p in sorted(ring, key=lambda p: int(p["num"]))
+        ]
+        if sorted(mapped) != list(range(n_ring)):
+            raise SystemExit(
+                f"board {board_id}: ring_map is not a permutation of the "
+                f"{n_ring}-pad ring — boards.json drifted")
+        data["ring_map"] = mapped
+    # Wire-bond limits the verify step checks against; the round COB fans
+    # longer and steeper than the rectangular mezzanine rules (1-3 mm,
+    # 45°) — the author's own wire guides confirm those landings.
+    data["wire_max_mm"] = entry.get("wire_max_mm", 3.0)
+    data["wire_max_angle_deg"] = entry.get("wire_max_angle_deg", 45)
     data["board"] = board_id
     data["rev"] = meta["rev"]
     data["dirty"] = meta["dirty"]
@@ -414,7 +475,8 @@ def main() -> None:
         if args.out == DEFAULT_OUT:
             args.out = REPO / "tmp" / "cob" / f"{board_id}.json"
 
-    data = extract(args.pcb)
+    padring_fp = entry.get("padring_fp") if args.board else None
+    data = extract(args.pcb, padring_fp=padring_fp)
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
     if args.board:

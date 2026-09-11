@@ -23,7 +23,7 @@ Boards pinned at chip-on-board-wire-bonded-pcbs `90fc89d`.
 | TQVC_chip_top_12_8 | 1x0.5 | 3932×2531 | 72 | 72 | TQVC_chip_top_12_8_1x0.5.pdf |
 | TQVC_chip_top_8_8 | 1x0.5 | 3932×2531 | 72 | 72 | TQVC_chip_top_8_8_1x0.5.pdf |
 
-## Board `1x1` (22 designs)
+## Board `1x1` (20 designs)
 
 | design | slot | die (µm) | pads | labelled | PDF |
 |---|---|---|---|---|---|
@@ -39,8 +39,6 @@ Boards pinned at chip-on-board-wire-bonded-pcbs `90fc89d`.
 | KIAN_chip_top_8_0 | 1x1 | 3932×5122 | 74 | 74 | KIAN_chip_top_8_0_1x1.pdf |
 | MOLE_chip_top_8_4 | 1x1 | 3932×5122 | 74 | 74 | MOLE_chip_top_8_4_1x1.pdf |
 | MOS2_chip_top_10_6 | 1x1 | 3932×5122 | 74 | 74 | MOS2_chip_top_10_6_1x1.pdf |
-| MOSB_chip_top_4_0 | 1x1 | 3932×5122 | 74 | 74 | MOSB_chip_top_4_0_1x1.pdf |
-| MOSB_chip_top_4_2 | 1x1 | 3932×5122 | 74 | 74 | MOSB_chip_top_4_2_1x1.pdf |
 | RBOY_chip_top_12_6 | 1x1 | 3932×5122 | 74 | 74 | RBOY_chip_top_12_6_1x1.pdf |
 | RZ80_chip_top_0_2 | 1x1 | 3932×5122 | 74 | 74 | RZ80_chip_top_0_2_1x1.pdf |
 | RZ80_chip_top_2_2 | 1x1 | 3932×5122 | 74 | 74 | RZ80_chip_top_2_2_1x1.pdf |
@@ -49,6 +47,13 @@ Boards pinned at chip-on-board-wire-bonded-pcbs `90fc89d`.
 | TZ01_chip_top_0_4 | 1x1 | 3932×5122 | 74 | 74 | TZ01_chip_top_0_4_1x1.pdf |
 | TZ01_chip_top_2_4 | 1x1 | 3932×5122 | 74 | 74 | TZ01_chip_top_2_4_1x1.pdf |
 | WSLG_chip_top_10_2 | 1x1 | 3932×5122 | 74 | 74 | WSLG_chip_top_10_2_1x1.pdf |
+
+## Board `mosb` (2 designs)
+
+| design | slot | die (µm) | pads | labelled | PDF |
+|---|---|---|---|---|---|
+| MOSB_chip_top_4_0 | 1x1 | 3932×5122 | 74 | 74 | MOSB_chip_top_4_0_1x1.pdf |
+| MOSB_chip_top_4_2 | 1x1 | 3932×5122 | 74 | 74 | MOSB_chip_top_4_2_1x1.pdf |
 
 ## Board `tqva` (1 designs)
 

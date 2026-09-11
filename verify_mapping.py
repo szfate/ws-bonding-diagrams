@@ -8,7 +8,7 @@ no crossings. Also cross-checks die pad 0 against the PAD_MAPPING.md
 worked example (GD03 pad 0 at 3406, 5064 µm display-frame) and against
 the footprint's own Cmts.User wire-guide lines.
 
-Writes an overlay plot per design: tmp/plot_mapping_<code>.png.
+Writes an overlay plot per design: tmp/plot_mapping_<code>_<name>.png.
 Exits 1 on hard violations (pad-count mismatch, crossings).
 
 Usage:
@@ -36,6 +36,11 @@ WORKED_EXAMPLE = {"design": "GD03_chip_top_6_6", "pad": 0,
                   "cx_um": 3406.0, "cy_um": 5064.0, "tol_um": 2.0}
 
 WIRE_MIN_MM = 1.0
+# Defaults come from run-1/wirebonding/README.md (rectangular mezzanines);
+# parse_pcb stamps per-board overrides ("wire_max_mm", "wire_max_angle_deg")
+# for boards whose fan legitimately differs — e.g. the round staggered COB
+# reaches 3.56 mm at up to 86° off the pad axis, matching the author's own
+# Cmts.User wire guides.
 WIRE_MAX_MM = 3.0
 WIRE_MAX_ANGLE_DEG = 45.0
 
@@ -105,10 +110,13 @@ def verify_design(design: dict, cob: dict) -> list[str]:
         return [f"pad count mismatch: die {len(die_pads)} vs pcb {len(ring)} "
                 f"(needs its own slot-variant COB)"]
 
-    # Pair die pad n with PCB pad n+1, the documented mapping.
+    # Pair die pad n with PCB pad n+1, the documented mapping — unless the
+    # board pins its own bond map (ring_map, ring-ordered die pad indices
+    # stamped by parse_pcb for rings that don't follow the convention).
+    ring_map = cob.get("ring_map")
     pairs = []
-    for pcb in ring:
-        n = int(pcb["num"]) - 1
+    for i, pcb in enumerate(ring):
+        n = ring_map[i] if ring_map else int(pcb["num"]) - 1
         dp = die_pads.get(n)
         if dp is None:
             issues.append(f"die pad {n} missing for pcb pad {pcb['num']}")
@@ -130,6 +138,10 @@ def verify_design(design: dict, cob: dict) -> list[str]:
 
     # Wire geometry per pair. PCB pads use footprint-local coords (x_mm,
     # y_mm): the die sits at the padring origin, not at the board origin.
+    # Per-board limits override the rectangular-board defaults (see module
+    # constants); the crossing check below stays strict on every board.
+    wire_max_mm = cob.get("wire_max_mm", WIRE_MAX_MM)
+    wire_max_angle = cob.get("wire_max_angle_deg", WIRE_MAX_ANGLE_DEG)
     lens, angs = [], []
     for n, dp, (dx, dy), pcb in pairs:
         px, py = pcb["x_mm"], pcb["y_mm"]
@@ -139,11 +151,11 @@ def verify_design(design: dict, cob: dict) -> list[str]:
         angle = math.degrees(math.acos(max(-1.0, min(1.0, abs(ux * ax + uy * ay)))))
         lens.append(length)
         angs.append(angle)
-        if not WIRE_MIN_MM <= length <= WIRE_MAX_MM:
+        if not WIRE_MIN_MM <= length <= wire_max_mm:
             issues.append(f"pad {n}: wire {length:.2f} mm outside "
-                          f"[{WIRE_MIN_MM}, {WIRE_MAX_MM}]")
-        if angle > WIRE_MAX_ANGLE_DEG:
-            issues.append(f"pad {n}: wire {angle:.1f}° off pad axis > {WIRE_MAX_ANGLE_DEG}°")
+                          f"[{WIRE_MIN_MM}, {wire_max_mm}]")
+        if angle > wire_max_angle:
+            issues.append(f"pad {n}: wire {angle:.1f}° off pad axis > {wire_max_angle:.0f}°")
 
     # Wire–wire crossings.
     n_cross = 0
@@ -180,7 +192,9 @@ def verify_design(design: dict, cob: dict) -> list[str]:
         ex, ey = die_end
         pcb = min(ring, key=lambda p: math.hypot(p["x_mm"] - ends[pad_end][0],
                                                  p["y_mm"] - ends[pad_end][1]))
-        n = int(pcb["num"]) - 1
+        # Paired die pad under the board's bond map (ring_map if pinned).
+        i = next(j for j, p in enumerate(ring) if p["num"] == pcb["num"])
+        n = ring_map[i] if ring_map else int(pcb["num"]) - 1
         dp = die_pads.get(n)
         if dp is None:
             continue
@@ -206,8 +220,10 @@ def plot_design(design: dict, cob: dict, out: Path) -> None:
     segments, colors = [], []
     cmap = plt.get_cmap("viridis")
     lmin, lmax = WIRE_MIN_MM, WIRE_MAX_MM
-    for pcb in ring:
-        n = int(pcb["num"]) - 1
+    ring_map = cob.get("ring_map")
+    title_map = "pinned ring_map" if ring_map else "pcb_pad = die_pad + 1"
+    for i, pcb in enumerate(ring):
+        n = ring_map[i] if ring_map else int(pcb["num"]) - 1
         dp = die_pads.get(n)
         if dp is None:
             continue
@@ -229,7 +245,7 @@ def plot_design(design: dict, cob: dict, out: Path) -> None:
         patch.set_alpha(0.9)
         ax.add_patch(patch)
     ax.add_collection(LineCollection(segments, colors=colors, linewidths=0.7, zorder=1))
-    ax.set_title(f"{design['name']} ↔ 1×1 padring — pcb_pad = die_pad + 1\n"
+    ax.set_title(f"{design['name']} ↔ {cob.get('board', '?')} padring — {title_map}\n"
                  f"wire color: green {lmin} mm → yellow {lmax} mm (KiCad y-up)")
     ax.set_aspect("equal")
     ax.autoscale()
@@ -267,7 +283,7 @@ def main() -> None:
             print(f"    VIOLATION: {msg}")
         if issues:
             rc = 1
-        plot_design(design, cob, REPO / "tmp" / f"plot_mapping_{design['code']}.png")
+        plot_design(design, cob, REPO / "tmp" / f"plot_mapping_{design['code']}_{design['name']}.png")
 
     raise SystemExit(rc)
 

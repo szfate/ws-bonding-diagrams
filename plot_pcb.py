@@ -40,6 +40,14 @@ def net_class(pad: dict) -> str:
     for cls in CLASS_COLORS:
         if pf.startswith(cls + "_") or pf == cls:
             return cls
+    # Third-party boards whose pinfunctions are generic (Pin_N): classify
+    # by net name. A single-supply VDD maps to VDD_IO for presentation —
+    # the bright red reads as power on the page.
+    name = (pad.get("net_name") or "").upper()
+    if name.startswith(("GND", "VSS")):
+        return "GND"
+    if name.startswith(("VDD", "VCC", "AVDD", "DVDD")):
+        return "VDD_IO"
     return "signal"
 
 

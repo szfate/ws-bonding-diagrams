@@ -15,13 +15,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from boards import load_boards
+
 REPO = Path(__file__).resolve().parent
 COB_DIR = REPO / "tmp" / "cob"
 OUT_DIR = REPO / "bonding-diagrams"
 
 
 def die_site(cob: dict) -> tuple[float, float] | None:
-    """Smallest F.Mask rect — the cavity the die drops into (mm)."""
+    """The die site (mm) — parse stamps the asserted boards.json value;
+    fall back to the smallest F.Mask rect for un-stamped COB JSONs."""
+    if cob.get("die_site_mm"):
+        return (cob["die_site_mm"][0], cob["die_site_mm"][1])
     cavity = None
     for s in cob["graphics"].get("F.Mask", []):
         if s["type"] == "rect" and "start" in s:
@@ -32,11 +37,30 @@ def die_site(cob: dict) -> tuple[float, float] | None:
     return cavity
 
 
-def matching_board(design: dict, cobs: list[dict]) -> dict | None:
-    """The board this design renders on, or None if no PCB exists."""
+def matching_board(design: dict, cobs: list[dict],
+                   boards_kb: dict) -> dict | None:
+    """The board this design renders on, or None if no PCB exists.
+
+    Precedence mirrors boards.resolve_board: a die named in a board's
+    "designs" claims it outright; everything else is matched
+    geometrically (pad count + die site) among the boards serving a slot
+    — a design-specific board (e.g. MOSB's round COB) never takes an
+    unclaimed die.
+    """
+    claims = [bid for bid, e in boards_kb.items()
+              if design["name"] in e.get("designs", ())]
+    if claims:
+        for cob in cobs:
+            if cob["board"] == claims[0]:
+                return cob
+        raise SystemExit(f"{design['name']}: claimed by board {claims[0]} "
+                         f"but tmp/cob/{claims[0]}.json is missing")
+    slot_boards = {bid for bid, e in boards_kb.items() if e.get("slot")}
     dw, dh = design["die_w_um"] / 1000.0, design["die_h_um"] / 1000.0
     matches = []
     for cob in cobs:
+        if cob["board"] not in slot_boards:
+            continue
         extras = set(str(n) for n in cob.get("extra_nums", []))
         ring = [p for p in cob["pads"] if str(p["num"]) not in extras]
         if len(design["pads"]) != len(ring):
@@ -54,6 +78,7 @@ def matching_board(design: dict, cobs: list[dict]) -> dict | None:
 def main() -> None:
     cobs = [json.loads(p.read_text()) for p in sorted(COB_DIR.glob("*.json"))]
     revs = {c["board"]: c.get("rev", "?")[:7] for c in cobs}
+    boards_kb = load_boards()
 
     pads_files = sorted((REPO / "tmp").glob("*/pads.json"))
     if not pads_files:
@@ -63,7 +88,7 @@ def main() -> None:
         designs = json.loads(pads_path.read_text())
         rows = []
         for d in designs:
-            cob = matching_board(d, cobs)
+            cob = matching_board(d, cobs, boards_kb)
             reticle = d.get("reticle", pads_path.parent.name)
             labelled = sum(1 for p in d["pads"] if p["net"])
             pdf = f"{d['name']}_{d['slot_size']}.pdf"
