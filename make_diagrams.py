@@ -1,15 +1,7 @@
-"""Vendored from wafer-space-die-pad-diagrams/make_diagrams.py (@ sibling
-repo HEAD) — the sibling can no longer take changes, so this copy is
-authoritative for the bonding-diagrams pipeline. The only delta from the
-sibling file is the max_px parameter on render_gds_background (see
-extract_dies.DIE_RENDER_MAX_PX). Module-level data paths resolve
-relative to this file's grandparent, i.e. they still expect the ws-run1
-checkout as a sibling of this repo. The generated per-design pinout
-PDFs/PNGs in the sibling repo's diagrams/ remain a data input (see
-make_bonding_diagrams.SIBLING_DIAGRAMS), not code.
-
-Original module docstring follows, verbatim:
----
+"""Vendored from https://github.com/mithro/wafer-space-die-pad-diagrams/make_diagrams.py (Apache-2.0,
+see LICENSE). Modified: the max_px parameter on render_gds_background
+(see extract_dies.DIE_RENDER_MAX_PX). Original module docstring follows,
+verbatim:
 
 Generate annotated pad diagrams for each design in the ws-run1 reticle.
 

@@ -1,6 +1,6 @@
 """Verify pcb_pad = die_pad + 1 by geometry before any diagram is drawn.
 
-Pairs die pad n (display frame from tmp/pads.json) with COB bond pad n+1
+Pairs die pad n (display frame from tmp/<reticle>/pads.json) with COB bond pad n+1
 (tmp/cob/<variant>.json) in the padring frame — die centered on the
 padring origin, KiCad y-down — and checks the wirebond rules from
 run-1/wirebonding/README.md: 1–3 mm length, ≤45° off the pad long axis,
@@ -26,10 +26,10 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 
 from plot_pcb import centered_rect
+from boards import find_pads
 
 REPO = Path(__file__).resolve().parent
 DEFAULT_COB = REPO / "tmp" / "cob" / "1x1.json"
-DEFAULT_PADS = REPO / "tmp" / "pads.json"
 
 # PAD_MAPPING.md worked example: GD03 diagram pad 0, post-display-rotation.
 WORKED_EXAMPLE = {"design": "GD03_chip_top_6_6", "pad": 0,
@@ -243,13 +243,15 @@ def plot_design(design: dict, cob: dict, out: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cob", type=Path, default=DEFAULT_COB)
-    ap.add_argument("--pads", type=Path, default=DEFAULT_PADS)
+    ap.add_argument("--pads", type=Path, default=None,
+                    help="pads.json (default: the single tmp/<reticle>/"
+                         "pads.json; required when several exist)")
     ap.add_argument("--designs", nargs="*", default=None,
                     help="subset of design names to verify (default: all)")
     args = ap.parse_args()
 
     cob = json.loads(args.cob.read_text())
-    designs = json.loads(args.pads.read_text())
+    designs = json.loads(find_pads(args.pads).read_text())
     if args.designs:
         designs = [d for d in designs if d["name"] in args.designs]
 

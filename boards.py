@@ -43,6 +43,26 @@ REQUIRED_FIELDS = ("git", "rev", "pcb", "ring_count", "extra_nums",
                    "qr_alignment", "die_site_mm")
 
 
+def find_pads(explicit: Path | None = None) -> Path:
+    """Resolve the pads file: tmp/<reticle>/pads.json for the single
+    extracted reticle, or an explicit --pads path.
+
+    Extraction writes per-reticle intermediates so die names can never
+    clash across reticles; with several extracted at once the caller
+    must disambiguate.
+    """
+    if explicit is not None:
+        return explicit
+    candidates = sorted((REPO / "tmp").glob("*/pads.json"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise SystemExit("no tmp/<reticle>/pads.json — run extract_dies.py first")
+    raise SystemExit("multiple reticles extracted: "
+                     + ", ".join(c.parent.name for c in candidates)
+                     + " — pass --pads tmp/<reticle>/pads.json")
+
+
 def load_boards(path: Path = BOARDS_JSON) -> dict:
     """Load and validate boards.json."""
     data = json.loads(path.read_text())

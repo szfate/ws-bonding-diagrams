@@ -1,6 +1,6 @@
 """Render multi-page factory bonding diagrams.
 
-Per design, one three-page PDF in bonding/, every page on the shared
+Per design, one three-page PDF in bonding-diagrams/, every page on the shared
 document template (page title + wafer.space logo in the header, page
 number in the footer):
   1. die pad diagram — the sibling repo's per-design pinout PDF
@@ -38,6 +38,7 @@ import json
 import math
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.font_manager as font_manager
@@ -63,11 +64,11 @@ from make_diagrams import (  # noqa: E402  (vendored, see its module header)
 )
 from plot_pcb import CLASS_COLORS, centered_rect, net_class  # noqa: E402
 from verify_mapping import extra_pads  # noqa: E402
+from boards import find_pads  # noqa: E402
 
-DEFAULT_PADS = REPO / "tmp" / "pads.json"
 DEFAULT_COB = REPO / "tmp" / "cob" / "1x1.json"
-OUT_DIR = REPO / "bonding"
-PAGE_DIR = REPO / "tmp" / "pages"
+OUT_DIR = REPO / "bonding-diagrams"
+TMP_ROOT = REPO / "tmp"
 SIBLING_DIAGRAMS = REPO.parent / "wafer-space-die-pad-diagrams" / "diagrams"
 LOGO_PNG = REPO / "logo-raw.webp"
 
@@ -88,8 +89,14 @@ LOGO_W_FRAC = 0.125
 LOGO_RIGHT_FRAC = 0.965
 FOOTER_Y = 0.012
 PAGE_TOTAL = 3
-# Shared axes rect for the mm frame on pages 2–3 (top edge = 0.915).
-AXES_RECT = (0.03, 0.15, 0.94, 0.765)
+# Generation stamp for the footer — one value per run so every page of a
+# batch carries the same timestamp.
+GENERATED_STAMP = datetime.now().strftime("%Y-%m-%d %H:%M")
+# Shared axes rect for the mm frame on pages 2–3 (top edge = 0.900).
+# The 0.030 band between the axes top and the header rule carries the
+# orientation note — tall enough that the note floats clear of the rule
+# instead of hugging it.
+AXES_RECT = (0.03, 0.15, 0.94, 0.75)
 # Content area below the header rule where page 1's cropped pinout is
 # placed (PDF pt, origin bottom-left).
 CONTENT_BOX_PT = (30.0, 45.0, A4_W_PT - 30.0, 0.915 * A4_H_PT)
@@ -238,17 +245,24 @@ def min_pad_pitch_mm(design: dict) -> float:
 
 
 def pinout_pdf_for(design: dict) -> Path:
-    """Locate the sibling repo's committed pinout PDF for this design."""
-    stem = f"{design['name']}_{design['slot_size']}"
-    exact = SIBLING_DIAGRAMS / f"{stem}.pdf"
-    if exact.exists():
-        return exact
-    matches = sorted(SIBLING_DIAGRAMS.glob(f"{design['name']}*.pdf"))
-    if matches:
-        return matches[0]
+    """Locate the page-1 pinout PDF for this design.
+
+    Generated per reticle in tmp/<reticle>/pinouts/ (see make_pinouts.py)
+    takes precedence; the sibling repo's committed run-1 PDFs are the
+    fallback. Only matches carrying the design's exact slot suffix count:
+    design names repeat across reticles with different padframes (run-1
+    CAFE is 1x1, run-2 CAFE is 0.5x0.5), so a bare name match could
+    silently embed the other die's pinout.
+    """
+    reticle = design.get("reticle", "ws-run1")
+    suffix = f"_{design['slot_size']}.pdf"
+    for folder in (TMP_ROOT / reticle / "pinouts", SIBLING_DIAGRAMS):
+        matches = sorted(p for p in folder.glob(f"{design['name']}*{suffix}"))
+        if matches:
+            return matches[0]
     raise SystemExit(
-        f"no pinout PDF for {design['name']} in {SIBLING_DIAGRAMS} — "
-        f"generate it in the sibling repo first")
+        f"no pinout PDF for {design['name']} (slot {design['slot_size']}) — "
+        f"run: uv run make_pinouts.py --reticle {reticle}")
 
 
 _logo_arr = None
@@ -284,7 +298,9 @@ def add_header(fig: plt.Figure, title: str, subtitle: str) -> None:
 
 
 def add_footer(fig: plt.Figure, page_num: int) -> None:
-    """Document template footer: page number at the right margin."""
+    """Document template footer: generation stamp left, page number right."""
+    fig.text(0.035, FOOTER_Y, f"generated on {GENERATED_STAMP}",
+             fontsize=6.5, color="#888888", ha="left", va="bottom")
     fig.text(LOGO_RIGHT_FRAC, FOOTER_Y, f"page {page_num} / {PAGE_TOTAL}",
              fontsize=6.5, color="#888888", ha="right", va="bottom")
 
@@ -346,12 +362,16 @@ def build_pinout_page(design: dict) -> PageObject:
     to cropbox), so setting the crop rect is the whole crop.
     """
     fig = plt.figure(figsize=(A4_W_IN, A4_H_IN))
-    add_header(fig, "die pad diagram",
+    code = design["name"].split("_")[0]
+    add_header(fig, f"{code} · die pad diagram",
                f"{design['name']} · slot {design['slot_size']}")
     add_footer(fig, 1)
-    template = PAGE_DIR / f"{design['name']}_{design['slot_size']}_p1_template.pdf"
+    _, page_dir = out_dirs(design)
+    template = page_dir / f"{design['name']}_{design['slot_size']}_p1_template.pdf"
     with PdfPages(template) as pdf:
-        pdf.savefig(fig)
+        # Same raster resample target as the other pages — the default
+        # figure dpi (100) crushes the header logo to ~100 dpi.
+        pdf.savefig(fig, dpi=PDF_RASTER_DPI)
     plt.close(fig)
 
     page = PageObject.create_blank_page(width=A4_W_PT, height=A4_H_PT)
@@ -811,8 +831,9 @@ def qr_fiducial_target(cob: dict) -> dict | None:
 def draw_fiducials(ax: plt.Axes, cob: dict, fs: float, y_top: float,
                    target: dict | None = None) -> None:
     """Placement-page fiducials: ring the board's QR-alignment marker and
-    label it above the board (the die's QR cell gets the box + zoom inset
-    of draw_qr_zoom, so the header note reads as QR box ↔ marker ring).
+    label it above the board (the die's QR cell gets the circle + zoom
+    inset of draw_qr_zoom, so the header note reads as QR circle ↔
+    marker ring).
     The circle marker sits beside the die QR (and the QR inset), so its
     label anchors right of the leader to stay clear of the inset box.
     """
@@ -834,7 +855,7 @@ def draw_fiducials(ax: plt.Axes, cob: dict, fs: float, y_top: float,
 
 def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
                  img: np.ndarray, y_top: float) -> None:
-    """Placement-page QR callout: maroon box on the die's QR cell, leader
+    """Placement-page QR callout: maroon circle on the die's QR cell, leader
     up to a magnified inset of that cell in the band above the board —
     the fiducial the assembler aligns the board rocket to. The inset is
     positioned in figure space (centred on the QR's figure-fraction x),
@@ -842,10 +863,12 @@ def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
     equal-aspect transform.
     """
     qx, qy, qh = die_qr_mm(design)
-    half_box = qh + 0.05  # highlight box pad around the 143 µm cell
-    ax.add_patch(Rectangle((qx - half_box, qy - half_box), 2 * half_box,
-                           2 * half_box, facecolor=FIDUCIAL_COLOR, alpha=0.25,
-                           edgecolor=FIDUCIAL_COLOR, lw=1.2 * fs, zorder=8))
+    # Circle highlight on the die end of the leader line (the inset box
+    # is the other end) — the same simple ring as the board fiducial,
+    # no fill, so it stays crisp in print.
+    qr_r = 1.65 * (qh + 0.05)
+    ax.add_patch(Circle((qx, qy), qr_r, fill=False,
+                        edgecolor=FIDUCIAL_COLOR, lw=1.5 * fs, zorder=8))
 
     fig.canvas.draw()  # settle the equal-aspect box before fig-space mapping
 
@@ -854,7 +877,7 @@ def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
         return (px / (fig.get_figwidth() * fig.dpi),
                 py / (fig.get_figheight() * fig.dpi))
 
-    cx_f, box_top_f = to_fig(qx, qy + half_box + 0.05)
+    cx_f, box_top_f = to_fig(qx, qy + qr_r + 0.05)
     _, board_top_f = to_fig(0.0, y_top)
     inset_h = QR_ZOOM_W_FRAC * A4_W_IN / A4_H_IN  # square on paper
     y0f = board_top_f + 0.006
@@ -1018,16 +1041,18 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     ax.set_axis_off()
 
     name, slot = design["name"], design["slot_size"]
+    code = name.split("_")[0]
     # Source PCB, for traceability — page 1 comes from the GDS, pages 2-3
     # from this board file.
     pcb_file = Path(cob["source"]).name
     if bonding:
-        add_header(fig, "bonding diagram",
-                   f"{name} · slot {slot} · {pcb_file} · {len(segments)} wires, "
+        add_header(fig, f"{code} · bonding diagram",
+                   f"{name} · slot {slot} · {pcb_file} · "
+                   f"{len(segments)} wires, "
                    f"length {min(lengths):.2f}–{max(lengths):.2f} mm")
         page_num = 3
     else:
-        add_header(fig, "die placement on PCB",
+        add_header(fig, f"{code} · die placement on PCB",
                    f"{name} · slot {slot} · {pcb_file} · "
                    f"die {design['die_w_um']:.0f}×{design['die_h_um']:.0f} µm")
         # Orientation note in the band between the header rule and the
@@ -1047,24 +1072,34 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     return fig
 
 
+def out_dirs(design: dict) -> tuple[Path, Path]:
+    """Per-reticle outputs: bonding-diagrams/<reticle>/ PDFs, tmp/<reticle>/pages/ previews.
+
+    Designs extracted before the reticle was stamped default to ws-run1.
+    """
+    reticle = design.get("reticle", "ws-run1")
+    return OUT_DIR / reticle, TMP_ROOT / reticle / "pages"
+
+
 def render_design(design: dict, cob: dict) -> Path:
-    """Write bonding/<name>_<slot>.pdf (3 pages) + per-page PNG previews."""
-    OUT_DIR.mkdir(exist_ok=True)
-    PAGE_DIR.mkdir(parents=True, exist_ok=True)
+    """Write bonding-diagrams/<reticle>/<name>_<slot>.pdf (3 pages) + PNG previews."""
+    out_dir, page_dir = out_dirs(design)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    page_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{design['name']}_{design['slot_size']}"
 
-    pages_pdf = PAGE_DIR / f"{stem}_pages23.pdf"
+    pages_pdf = page_dir / f"{stem}_pages23.pdf"
     with PdfPages(pages_pdf) as pdf:
         for bonding in (False, True):
             fig = build_page(design, cob, bonding)
             pdf.savefig(fig, dpi=PDF_RASTER_DPI)
             tag = "p3" if bonding else "p2"
-            fig.savefig(PAGE_DIR / f"{stem}_{tag}.png", dpi=600)
+            fig.savefig(page_dir / f"{stem}_{tag}.png", dpi=600)
             plt.close(fig)
 
     page1 = build_pinout_page(design)
 
-    out = OUT_DIR / f"{stem}.pdf"
+    out = out_dir / f"{stem}.pdf"
     writer = PdfWriter()
     writer.add_page(page1)
     writer.append(str(pages_pdf))
@@ -1074,7 +1109,7 @@ def render_design(design: dict, cob: dict) -> Path:
     if shutil.which("pdftoppm"):  # p1 preview; p2/p3 save PNGs directly above
         subprocess.run(
             ["pdftoppm", "-png", "-r", "600", "-f", "1", "-l", "1", "-singlefile",
-             str(out), str(PAGE_DIR / f"{stem}_p1")], check=True)
+             str(out), str(page_dir / f"{stem}_p1")], check=True)
     return out
 
 
@@ -1084,18 +1119,22 @@ def main() -> None:
                     help="design cell names (default: WSLG)")
     ap.add_argument("--board", help="board id in boards.json — shorthand "
                                     "for --cob tmp/cob/<board>.json")
-    ap.add_argument("--pads", type=Path, default=DEFAULT_PADS)
+    ap.add_argument("--pads", type=Path, default=None,
+                    help="pads.json (default: the single tmp/<reticle>/"
+                         "pads.json; required when several exist)")
     ap.add_argument("--cob", type=Path, default=DEFAULT_COB)
     args = ap.parse_args()
 
     if args.board:
         args.cob = REPO / "tmp" / "cob" / f"{args.board}.json"
     cob = json.loads(args.cob.read_text())
-    designs = json.loads(args.pads.read_text())
+    pads_path = find_pads(args.pads)
+    designs = json.loads(pads_path.read_text())
     if args.designs:
         designs = [d for d in designs if d["name"] in args.designs]
     if not designs:
-        raise SystemExit("no matching designs in tmp/pads.json — run extract_dies.py first")
+        raise SystemExit(f"no matching designs in {pads_path} "
+                         "— run extract_dies.py first")
 
     ring = [p for p in cob["pads"] if p["num"] not in board_extras(cob)]
     # Die must physically fit the board's die site: the smallest F.Mask
@@ -1113,6 +1152,11 @@ def main() -> None:
         if len(design["pads"]) != len(ring):
             print(f"SKIP {design['name']}: pad count mismatch "
                   f"(die {len(design['pads'])} vs COB {len(ring)})")
+            continue
+        try:
+            pinout_pdf_for(design)
+        except SystemExit as e:
+            print(f"SKIP {design['name']}: {e}")
             continue
         dw, dh = design["die_w_um"] / 1000.0, design["die_h_um"] / 1000.0
         if cavity and (dw > cavity[0] + 0.2 or dh > cavity[1] + 0.2):

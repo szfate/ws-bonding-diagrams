@@ -13,11 +13,12 @@ display-frame coordinates map straight onto the padring frame (both
 rotations cancel; see PAD_MAPPING.md in the sibling repo).
 
 Outputs:
-    tmp/pads.json                    — per-design pad data
-    tmp/gds_renders/<cell>.png       — two-tone die render, display orientation
+    tmp/<reticle>/pads.json            — per-design pad data
+    tmp/<reticle>/gds_renders/<cell>.png — two-tone die render, display orientation
 
 Usage:
-    uv run extract_dies.py [--designs GD03_chip_top_16_4 ...] [--all] [--force]
+    uv run extract_dies.py [--reticle ws-run1] [--designs GD03_chip_top_16_4 ...]
+                           [--all] [--force] [--out PATH]
 """
 
 from __future__ import annotations
@@ -31,8 +32,8 @@ import klayout.db as kdb
 
 REPO = Path(__file__).resolve().parent
 
-from make_diagrams import (  # noqa: E402  (vendored, see module docstring)
-    OAS,
+import make_diagrams  # noqa: E402  (vendored, see its module docstring)
+from make_diagrams import (  # noqa: E402
     _classify_edge,
     _is_peripheral,
     _number_pads_ccw,
@@ -47,8 +48,9 @@ from make_diagrams import (  # noqa: E402  (vendored, see module docstring)
     setup_layout_view,
 )
 
-DEFAULT_OUT = REPO / "tmp" / "pads.json"
-BG_DIR = REPO / "tmp" / "gds_renders"
+# Per-reticle intermediates under tmp/<reticle>/ — die cell names can
+# repeat across reticles, so nothing reticle-specific shares a folder.
+TMP_ROOT = REPO / "tmp"
 
 # Long-edge pixels for the two-tone die render. The bonding pages show
 # the die ~12x life size, and the placement page's QR zoom inset crops a
@@ -66,7 +68,38 @@ DEFAULT_DESIGNS = [
 ]
 
 
-def extract_design(layout: kdb.Layout, lv, name: str, force: bool) -> dict:
+def resolve_reticle(arg: str) -> tuple[Path, Path]:
+    """Resolve --reticle to (checkout dir, reticle OAS path).
+
+    Accepts a sibling directory name (resolved next to this repo, like
+    the vendored module's own default) or an explicit path. The OAS is
+    layout/reticle.oas, or — as in ws-run2, where the reticle ships as
+    checksummed parts assembled by layout/create-reticle-oas.sh — the
+    single other *.oas in layout/.
+    """
+    p = Path(arg).expanduser()
+    if not p.is_dir():
+        sib = REPO.parent / arg
+        if sib.is_dir():
+            p = sib
+    if not p.is_dir():
+        raise SystemExit(f"reticle {arg!r}: directory not found ({p})")
+    oas = p / "layout" / "reticle.oas"
+    if not oas.exists():
+        others = sorted((p / "layout").glob("*.oas"))
+        if len(others) == 1:
+            oas = others[0]
+            print(f"note: using {oas.name} (no layout/reticle.oas)")
+        else:
+            raise SystemExit(f"reticle {arg!r}: no layout/reticle.oas and "
+                             f"{len(others)} other .oas files in {p / 'layout'}")
+    if not (p / "lyp" / "gf180mcu.lyp").exists():
+        raise SystemExit(f"reticle {arg!r}: no lyp/gf180mcu.lyp in {p}")
+    return p.resolve(), oas
+
+
+def extract_design(layout: kdb.Layout, lv, name: str, force: bool,
+                   reticle: str, bg_dir: Path) -> dict:
     """Run the sibling pipeline for one design cell and return its data dict."""
     cell = layout.cell(name)
     if cell is None:
@@ -93,9 +126,9 @@ def extract_design(layout: kdb.Layout, lv, name: str, force: bool) -> dict:
 
     slot = computed_slot_size(die_bb[2] - die_bb[0], die_bb[3] - die_bb[1])
 
-    # Two-tone die render, cached by cell name like the sibling repo.
-    BG_DIR.mkdir(parents=True, exist_ok=True)
-    bg_png = BG_DIR / f"{name}.png"
+    # Two-tone die render, cached per reticle + cell name.
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    bg_png = bg_dir / f"{name}.png"
     if force or not bg_png.exists():
         render_gds_background(lv, name, layout, die_bb, bg_png,
                               max_px=DIE_RENDER_MAX_PX)
@@ -105,6 +138,7 @@ def extract_design(layout: kdb.Layout, lv, name: str, force: bool) -> dict:
     return {
         "name": name,
         "code": _project_code(name),
+        "reticle": reticle,
         "slot_size": slot,
         "die_bb_um": list(die_bb),
         "die_w_um": die_bb[2] - die_bb[0],
@@ -126,34 +160,50 @@ def extract_design(layout: kdb.Layout, lv, name: str, force: bool) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--reticle", default="ws-run1",
+                    help="sibling checkout dir name or path containing "
+                         "layout/reticle.oas (default: ws-run1)")
     ap.add_argument("--designs", nargs="*", default=DEFAULT_DESIGNS,
                     help="design cell names (default: smoke subset)")
     ap.add_argument("--all", action="store_true",
                     help="extract every design on the reticle")
     ap.add_argument("--force", action="store_true",
                     help="re-render cached GDS backgrounds")
-    ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--out", type=Path, default=None,
+                    help="pads.json output path (default: "
+                         "tmp/<reticle>/pads.json)")
     args = ap.parse_args()
 
+    reticle_dir, oas = resolve_reticle(args.reticle)
+    reticle = reticle_dir.name
+    # The vendored module resolves its layer props from a module-level
+    # path; point it at this reticle before building the layout view.
+    make_diagrams.LYP = reticle_dir / "lyp" / "gf180mcu.lyp"
+
+    out_path = args.out or (TMP_ROOT / reticle / "pads.json")
+
     layout = kdb.Layout()
-    print(f"Reading {OAS} ...")
+    print(f"Reading {oas} ...")
     t0 = time.time()
-    layout.read(str(OAS))
+    layout.read(str(oas))
     print(f"  loaded in {time.time() - t0:.1f}s — {layout.cells()} cells")
 
     designs = args.designs
     if args.all:
         top = next(iter(layout.top_cells()))
-        skip = {"RETICLE_FILL", "TEXT"}
+        # RETICLE_FILL is the fill cell; TEXT* are annotation cells — the
+        # run-2 reticle names one TEXT$1, so the match is by prefix.
         designs = sorted({inst.cell.name for inst in top.each_inst()
-                          if inst.cell.name not in skip})
+                          if inst.cell.name != "RETICLE_FILL"
+                          and not inst.cell.name.startswith("TEXT")})
 
     lv = setup_layout_view(layout)
 
+    bg_dir = TMP_ROOT / reticle / "gds_renders"
     out = []
     for i, name in enumerate(designs, start=1):
         t0 = time.time()
-        d = extract_design(layout, lv, name, args.force)
+        d = extract_design(layout, lv, name, args.force, reticle, bg_dir)
         out.append(d)
         labelled = sum(1 for p in d["pads"] if p["net"])
         print(f"  [{i}/{len(designs)}] {name}: slot {d['slot_size']}  "
@@ -161,9 +211,9 @@ def main() -> None:
               f"{len(d['pads'])} pads, {labelled} labelled  "
               f"({time.time() - t0:.1f}s)")
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(out, indent=1))
-    print(f"wrote {args.out} ({len(out)} designs)")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, indent=1))
+    print(f"wrote {out_path} ({len(out)} designs)")
 
 
 if __name__ == "__main__":
