@@ -711,8 +711,10 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True,
 
     # Padring-footprint silk (filled corner dot, edge marks) — footprint-
     # local like the copper above; MOSB's board is the first with any.
+    # Silk belongs under the mask-opening fill: manufacturers suppress
+    # silkscreen over mask cutouts, so the opening clips it realistically.
     _draw_shapes(ax, cob["graphics"].get("F.SilkS", []),
-                 dict(color=PCB_STYLE["silk"]), zorder=3, pt_per_mm=pt_per_mm,
+                 dict(color=PCB_STYLE["silk"]), zorder=1.7, pt_per_mm=pt_per_mm,
                  xf=lambda p: local_to_plot(cob, *p), outline_only=("rect",))
 
     # Board silkscreen (pin-1 marker, marking box) — global board frame,
@@ -721,7 +723,7 @@ def draw_board(ax: plt.Axes, cob: dict, fs: float, show_numbers: bool = True,
     # so it reads as a frame, not painted silk. Eco layers are assembly
     # planning, not bonding info — skipped.
     _draw_shapes(ax, cob["board_graphics"].get("F.SilkS", []),
-                 dict(color=PCB_STYLE["silk"]), zorder=3, cob=cob,
+                 dict(color=PCB_STYLE["silk"]), zorder=1.7, cob=cob,
                  pt_per_mm=pt_per_mm, outline_only=("rect",))
 
     # Bond pads: gold ENIG ring with a class-colored rim; the mechanical
