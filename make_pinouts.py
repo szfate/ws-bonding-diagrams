@@ -37,7 +37,9 @@ from make_diagrams import (  # noqa: E402
     render_gds_background,
     setup_layout_view,
 )
-from extract_dies import DIE_RENDER_MAX_PX, TMP_ROOT, resolve_reticle  # noqa: E402
+from extract_dies import (DIE_RENDER_MAX_PX, TMP_ROOT, resolve_reticle,
+                          _rotate_pad_180_inplace)  # noqa: E402
+from runs import run_config  # noqa: E402
 
 
 def main() -> None:
@@ -52,6 +54,8 @@ def main() -> None:
 
     reticle_dir, oas = resolve_reticle(args.reticle)
     reticle = reticle_dir.name
+    cfg = run_config(reticle)
+    display_rot = cfg["page1_die_rotation_deg"] == 180
     # The vendored module resolves its layer props from a module-level
     # path; point it at this reticle before building the layout view.
     make_diagrams.LYP = reticle_dir / "lyp" / "gf180mcu.lyp"
@@ -84,7 +88,9 @@ def main() -> None:
             continue
 
         # Same pipeline as the vendored module's main(): pads native →
-        # peripheral filter → 180° display rotation → CCW numbering.
+        # peripheral filter → display rotation (if configured) → CCW
+        # numbering; numbering is QR-anchored and only knows the display
+        # frame, so GDS-frame output rotates back after numbering.
         pads = extract_pads(cell, layout)
         labels = extract_labels(cell, layout)
         assign_net_names(pads, labels)
@@ -96,8 +102,12 @@ def main() -> None:
             bb.top * layout.dbu,
         )
         pads = [p for p in pads if _is_peripheral(p, *die_bb)]
-        pads = [_rotate_pad_180(p, die_bb) for p in pads]
+        if display_rot:
+            pads = [_rotate_pad_180(p, die_bb) for p in pads]
         _number_pads_ccw(pads, die_bb)
+        if not display_rot:
+            for p in pads:
+                _rotate_pad_180_inplace(p, die_bb)
         slot = computed_slot_size(die_bb[2] - die_bb[0], die_bb[3] - die_bb[1])
 
         stem = f"{name}_{slot}"
@@ -110,11 +120,13 @@ def main() -> None:
         if not bg_png.exists():
             render_gds_background(lv, name, layout, die_bb, bg_png,
                                   max_px=DIE_RENDER_MAX_PX)
-            _rotate_image_180(bg_png)
+            if display_rot:
+                _rotate_image_180(bg_png)
 
         t0 = time.time()
         render(name, pads, die_bb, out_dir / f"{stem}.png",
-               out_dir / f"{stem}.svg", out_pdf, background_image=bg_png)
+               out_dir / f"{stem}.svg", out_pdf, background_image=bg_png,
+               rotated=display_rot)
         labelled = sum(1 for p in pads if p.net)
         print(f"  [{i}/{len(designs)}] {name}: {len(pads)} pads, "
               f"{labelled} labelled  slot {slot}  ({time.time() - t0:.1f}s)")

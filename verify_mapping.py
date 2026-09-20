@@ -27,6 +27,7 @@ from matplotlib.collections import LineCollection
 
 from plot_pcb import centered_rect
 from boards import find_pads
+from runs import run_config
 
 REPO = Path(__file__).resolve().parent
 DEFAULT_COB = REPO / "tmp" / "cob" / "1x1.json"
@@ -55,17 +56,28 @@ def extra_pads(cob: dict) -> set[str]:
     return set(cob.get("extra_nums", []))
 
 
-def die_pad_to_pcb_mm(pad: dict, die_bb: list[float]) -> tuple[float, float]:
-    """Die display-frame pad → padring-frame mm (KiCad y-down).
+def die_pad_to_pcb_mm(pad: dict, die_bb: list[float],
+                      rel_rot_deg: int = 0) -> tuple[float, float]:
+    """Padring-frame mm (KiCad y-down) for a die pad stored in a frame
+    that is rel_rot_deg away from GDS.
 
-    The die is centered on the padring origin; both the display rotation
-    and the physical placement rotation are 180°, so they cancel and
-    display-frame x maps directly to PCB x, display-frame +y (up) to
-    PCB −y.
+    The die is physically placed die_placement_rotation_deg from GDS;
+    with pads.json in the display frame (page1_die_rotation_deg == 180)
+    the rotations cancel and the transform is the identity (the previous
+    behavior). With GDS-frame data (ws-run2) the placement rotation must
+    be applied explicitly: a 180° relative rotation negates both
+    offsets.
     """
     cx0 = 0.5 * (die_bb[0] + die_bb[2])
     cy0 = 0.5 * (die_bb[1] + die_bb[3])
-    return (pad["cx_um"] - cx0) / 1000.0, -(pad["cy_um"] - cy0) / 1000.0
+    x = (pad["cx_um"] - cx0) / 1000.0
+    y = -(pad["cy_um"] - cy0) / 1000.0
+    rel = rel_rot_deg % 360
+    if rel == 0:
+        return x, y
+    if rel == 180:
+        return -x, -y
+    raise SystemExit(f"unsupported relative rotation {rel_rot_deg}°")
 
 
 def pad_axis_kicad(rot_deg: float) -> tuple[float, float]:
@@ -96,7 +108,7 @@ def segments_cross(a1, a2, b1, b2) -> bool:
     return False
 
 
-def verify_design(design: dict, cob: dict) -> list[str]:
+def verify_design(design: dict, cob: dict, rel_rot_deg: int = 0) -> list[str]:
     """Run all checks for one design; return human-readable violations."""
     issues: list[str] = []
     die_bb = design["die_bb_um"]
@@ -121,7 +133,7 @@ def verify_design(design: dict, cob: dict) -> list[str]:
         if dp is None:
             issues.append(f"die pad {n} missing for pcb pad {pcb['num']}")
             continue
-        dx, dy = die_pad_to_pcb_mm(dp, die_bb)
+        dx, dy = die_pad_to_pcb_mm(dp, die_bb, rel_rot_deg)
         pairs.append((n, dp, (dx, dy), pcb))
 
     # Worked-example spot check.
@@ -198,7 +210,7 @@ def verify_design(design: dict, cob: dict) -> list[str]:
         dp = die_pads.get(n)
         if dp is None:
             continue
-        dx, dy = die_pad_to_pcb_mm(dp, die_bb)
+        dx, dy = die_pad_to_pcb_mm(dp, die_bb, rel_rot_deg)
         guide_errs.append(math.hypot(dx - ex, dy - ey))
     if guide_errs:
         print(f"  wire-guide endpoint distance: max {max(guide_errs):.3f} mm, "
@@ -210,7 +222,8 @@ def verify_design(design: dict, cob: dict) -> list[str]:
     return issues
 
 
-def plot_design(design: dict, cob: dict, out: Path) -> None:
+def plot_design(design: dict, cob: dict, out: Path,
+                rel_rot_deg: int = 0) -> None:
     die_bb = design["die_bb_um"]
     die_pads = {p["n"]: p for p in design["pads"]}
     ring = sorted((p for p in cob["pads"] if p["num"] not in extra_pads(cob)),
@@ -227,7 +240,7 @@ def plot_design(design: dict, cob: dict, out: Path) -> None:
         dp = die_pads.get(n)
         if dp is None:
             continue
-        dx, dy = die_pad_to_pcb_mm(dp, die_bb)
+        dx, dy = die_pad_to_pcb_mm(dp, die_bb, rel_rot_deg)
         px, py = pcb["x_mm"], pcb["y_mm"]
         segments.append([(dx, -dy), (px, -py)])
         length = math.hypot(px - dx, py - dy)
@@ -275,7 +288,13 @@ def main() -> None:
     for design in designs:
         print(f"{design['name']} (slot {design['slot_size']}, "
               f"{len(design['pads'])} pads):")
-        issues = verify_design(design, cob)
+        # The placement rotation is a per-board fact (boards.json,
+        # stamped by parse_pcb); rel is the stored die data's rotation
+        # away from it.
+        cfg = run_config(design.get("reticle", "ws-run1"), design["name"])
+        rel = (cob.get("die_placement_rotation_deg", 180)
+               - cfg["page1_die_rotation_deg"]) % 360
+        issues = verify_design(design, cob, rel_rot_deg=rel)
         if len(issues) == 1 and "pad count mismatch" in issues[0]:
             print(f"    SKIP: {issues[0]}")
             continue
@@ -283,7 +302,8 @@ def main() -> None:
             print(f"    VIOLATION: {msg}")
         if issues:
             rc = 1
-        plot_design(design, cob, REPO / "tmp" / f"plot_mapping_{design['code']}_{design['name']}.png")
+        plot_design(design, cob, REPO / "tmp" / f"plot_mapping_{design['code']}_{design['name']}.png",
+                    rel_rot_deg=rel)
 
     raise SystemExit(rc)
 

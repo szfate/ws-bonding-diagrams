@@ -102,16 +102,19 @@ repo) carry a few extra pins:
 
 ## Pad correspondence
 
-`pcb_pad = die_pad + 1`: both rings number counter-clockwise from the
-top-right corner, and the die's 180° placement rotation cancels the
-pinout diagrams' 180° display rotation. The full chain, worked example,
-and rotation warnings live in
-`wafer-space-die-pad-diagrams/PAD_MAPPING.md` — read it before debugging
-any off-by-one or flipped wire. `verify_mapping.py` re-checks the
-mapping geometrically per board (pad counts, per-pad distances, wire
-angles) and fails loudly on mismatch. Boards with a pinned `ring_map`
-(see above) deviate from the `+1` convention on purpose — their pairing
-is `ring_map`-ordered.
+`pcb_pad = die_pad + 1`: both rings number counter-clockwise from their
+QR / pin-1 corners. Orientations are config-driven: runs.json sets how
+page 1 draws the die relative to GDS (`page1_die_rotation_deg`) and how
+pages 2–3 rotate the drawn board (`view_rotation_deg`); boards.json
+pins how the die physically sits in each board's cavity
+(`die_placement_rotation_deg` — the 1x0p5 board is authored rotated
+relative to the others). The full chain, worked example, and rotation
+warnings live in `wafer-space-die-pad-diagrams/PAD_MAPPING.md` — read
+it before debugging any off-by-one or flipped wire.
+`verify_mapping.py` re-checks the mapping geometrically per board (pad
+counts, per-pad distances, wire angles) and fails loudly on mismatch.
+Boards with a pinned `ring_map` (see above) deviate from the `+1`
+convention on purpose — their pairing is `ring_map`-ordered.
 
 ## How to run
 

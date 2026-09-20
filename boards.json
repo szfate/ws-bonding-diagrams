@@ -7,9 +7,20 @@
       "slot": "1x1",
       "designs": [],
       "ring_count": 74,
-      "extra_nums": ["75", "76", "77", "78", "79", "80", "81"],
+      "extra_nums": [
+        "75",
+        "76",
+        "77",
+        "78",
+        "79",
+        "80",
+        "81"
+      ],
       "qr_alignment": "rocket",
-      "die_site_mm": [9.4, 10.23]
+      "die_site_mm": [
+        9.4,
+        10.23
+      ]
     },
     "1x0p5": {
       "git": "git@github.com:wafer-space/chip-on-board-wire-bonded-pcbs.git",
@@ -18,9 +29,20 @@
       "slot": "1x0.5",
       "designs": [],
       "ring_count": 72,
-      "extra_nums": ["75", "76", "77", "78", "79", "80", "81"],
+      "extra_nums": [
+        "75",
+        "76",
+        "77",
+        "78",
+        "79",
+        "80",
+        "81"
+      ],
       "qr_alignment": "rocket",
-      "die_site_mm": [4.2, 2.8]
+      "die_site_mm": [
+        4.2,
+        2.8
+      ]
     },
     "0p5x1": {
       "git": "git@github.com:wafer-space/chip-on-board-wire-bonded-pcbs.git",
@@ -29,9 +51,20 @@
       "slot": "0.5x1",
       "designs": [],
       "ring_count": 72,
-      "extra_nums": ["75", "76", "77", "78", "79", "80", "81"],
+      "extra_nums": [
+        "75",
+        "76",
+        "77",
+        "78",
+        "79",
+        "80",
+        "81"
+      ],
       "qr_alignment": "copper-circle",
-      "die_site_mm": [2.5, 5.5]
+      "die_site_mm": [
+        2.5,
+        5.5
+      ]
     },
     "tqva": {
       "git": "git@github.com:wafer-space/chip-on-board-wire-bonded-pcbs.git",
@@ -40,9 +73,20 @@
       "slot": "0.5x0.5",
       "designs": [],
       "ring_count": 56,
-      "extra_nums": ["57", "58", "59", "60", "61", "62", "63"],
+      "extra_nums": [
+        "57",
+        "58",
+        "59",
+        "60",
+        "61",
+        "62",
+        "63"
+      ],
       "qr_alignment": "copper-circle",
-      "die_site_mm": [2.5, 3.2]
+      "die_site_mm": [
+        2.5,
+        3.2
+      ]
     },
     "mosb": {
       "git": "https://github.com/mosbiuschip/WaferSpace_COB_70pins.git",
@@ -50,13 +94,29 @@
       "pcb": "V3_COB_Original/V3_COB_Original/V3_COB_Original.kicad_pcb",
       "padring_fp": "MOSBius_V2_CHIP:waferspace_default_padring_v0.2",
       "edge_cuts_layer": "User.4",
-      "designs": ["MOSB_chip_top_4_0", "MOSB_chip_top_4_2"],
+      "designs": [
+        "MOSB_chip_top_4_0",
+        "MOSB_chip_top_4_2"
+      ],
       "ring_count": 74,
-      "extra_nums": ["75", "76", "77", "78", "79", "80", "81"],
+      "extra_nums": [
+        "75",
+        "76",
+        "77",
+        "78",
+        "79",
+        "80",
+        "81"
+      ],
       "qr_alignment": "rocket",
-      "die_site_mm": [4.0, 5.2],
+      "die_site_mm": [
+        4.0,
+        5.2
+      ],
       "die_site_pad": "75",
-      "ring_map": {"offset": 17}
+      "ring_map": {
+        "offset": 17
+      }
     }
   }
 }

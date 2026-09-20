@@ -450,6 +450,11 @@ def apply_board_facts(data: dict, board_id: str, entry: dict,
     # 45°) — the author's own wire guides confirm those landings.
     data["wire_max_mm"] = entry.get("wire_max_mm", 3.0)
     data["wire_max_angle_deg"] = entry.get("wire_max_angle_deg", 45)
+    # How the die physically sits in this board's cavity, relative to
+    # GDS (180 for the run-1 convention; boards authored rotated — like
+    # 1x0p5 — pin 0). verify_mapping checks it against the wire guides.
+    data["die_placement_rotation_deg"] = entry.get(
+        "die_placement_rotation_deg", 180)
     data["board"] = board_id
     data["rev"] = meta["rev"]
     data["dirty"] = meta["dirty"]

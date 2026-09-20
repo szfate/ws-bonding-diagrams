@@ -80,6 +80,7 @@ WSIP_CELL_UM = 143.0
 WSIP_QR_INSET_UM = (40.0, 50.0)   # from (die.x0, die.y0)
 WSIP_LOGO_INSET_UM = (15.0, 11.0)  # from (die.x1, die.y1)
 WSIP_QR_COLOR = "#00838f"   # deep cyan — contrasts yellow metal + red pads
+ID_QR_COLOR = "#9b1b1b"     # GDS-frame ID QR marker — matches pages 2-3 tag
 WSIP_LOGO_COLOR = "#ad1457"  # magenta — same
 
 # QR payload + segno parameters that reproduce the per-chip QRs that
@@ -563,10 +564,16 @@ def _draw_qr_on_ax(ax: plt.Axes, data: str,
 
 def render(cell_name: str, pads: list[Pad], die_bb: tuple[float, float, float, float],
            out_png: Path, out_svg: Path, out_pdf: Path | None = None,
-           background_image: Path | None = None) -> None:
+           background_image: Path | None = None,
+           rotated: bool = True) -> None:
     """Render pad diagram. If background_image is given, use it as the
     die-area background (typically a KLayout GDS render of the cell).
-    Writes PNG + SVG, plus PDF if out_pdf is supplied."""
+    Writes PNG + SVG, plus PDF if out_pdf is supplied.
+
+    rotated=True (default) draws the conventional display frame: QR
+    top-right, logo bottom-left. rotated=False draws the GDS frame —
+    pads are passed in GDS coordinates and the QR/logo highlight boxes
+    and their corner annotations are mirrored accordingly."""
     x0, y0, x1, y1 = die_bb
     die_w = x1 - x0
     die_h = y1 - y0
@@ -646,17 +653,23 @@ def render(cell_name: str, pads: list[Pad], die_bb: tuple[float, float, float, f
     # Corner markers from the wafer.space template: QR in bottom-left,
     # logo in top-right. Both render in the same yellow metal as the rest
     # of the chip, so they're hard to spot — overlay a thick coloured
-    # frame around each (slightly grown for visibility), then annotate
+    # frame around it (slightly grown for visibility), then annotate
     # outside the die with a short leader line connecting the label to
     # the frame. Keeping the label text outside the die avoids covering
-    # any of the chip artwork.
+    # any of the chip artwork. The logo corner gets no callout: its
+    # artwork has no fixed meaning across runs (ws-run2 dies carry
+    # other cells there), so labelling it would be wrong.
     qr_bb, logo_bb = _wsip_corners(die_bb)
+    # In the GDS frame the highlight box grows to the same corner region
+    # the bl corner-zoom inset magnifies, and goes red to match the label.
+    crop = min(ZOOM_CROP_UM, 0.5 * min(die_w, die_h))
+    if not rotated:
+        qr_bb = (x0, y0, x0 + crop, y0 + crop)
     grow = max(die_w, die_h) * 0.005  # ~0.5% of die — bump frames outward
     # Label position offset from the die corner, into the outer margin.
     label_off = margin * 0.28
-    # After 180° rotation the QR sits in the top-right and the logo in
-    # the bottom-left, so each annotation's outer-margin label and
-    # leader line are anchored to the corner the cell now occupies.
+    # After 180° rotation the QR sits in the top-right, so the label and
+    # leader anchor to the outer top-right corner.
     #
     # That outer-margin corner is the same rectangle the corner zoom
     # inset (_add_corner_zoom, zorder=6) is sized to fill, so the
@@ -664,37 +677,44 @@ def render(cell_name: str, pads: list[Pad], die_bb: tuple[float, float, float, f
     # poking past its edge stay visible. The inset shows a zoom of this
     # very cell, so labelling it on top is coherent: the highlight box,
     # leader and text are drawn at zorder >6 to sit above the inset.
-    for bb, col, label, anchor in (
-        (qr_bb, WSIP_QR_COLOR, "ID QR", "tr"),
-        (logo_bb, WSIP_LOGO_COLOR, "wafer.space logo", "bl"),
-    ):
-        bx0, by0, bx1, by1 = bb
-        bx0 -= grow
-        by0 -= grow
-        bx1 += grow
-        by1 += grow
-        ax.add_patch(mpatches.Rectangle(
-            (bx0, by0), bx1 - bx0, by1 - by0,
-            linewidth=3.0, edgecolor=col, facecolor=col, alpha=0.22,
-            zorder=7,
-        ))
-        if anchor == "bl":
-            # Logo sits in bottom-left; label in outer bottom-left.
-            tx, ty = x0 - label_off, y0 - label_off
-            ha_l, va_l = "right", "top"
-            leader_from = (bx0, by0)
-        else:
-            # QR sits in top-right; label in outer top-right.
-            tx, ty = x1 + label_off, y1 + label_off
-            ha_l, va_l = "left", "bottom"
-            leader_from = (bx1, by1)
-        ax.plot(
-            [leader_from[0], tx], [leader_from[1], ty],
-            color=col, linewidth=1.0, alpha=0.8, zorder=7.1,
-        )
-        ax.text(tx, ty, label,
-                color=col, fontsize=10, ha=ha_l, va=va_l,
-                family="monospace", fontweight="bold", zorder=7.2)
+    bx0, by0, bx1, by1 = qr_bb
+    bx0 -= grow
+    by0 -= grow
+    bx1 += grow
+    by1 += grow
+    hl_edge = ID_QR_COLOR if not rotated else WSIP_QR_COLOR
+    ax.add_patch(mpatches.Rectangle(
+        (bx0, by0), bx1 - bx0, by1 - by0,
+        linewidth=3.0, edgecolor=hl_edge, facecolor=hl_edge,
+        alpha=0.22, zorder=7,
+    ))
+    if rotated:
+        # QR sits top-right; label in the outer top-right.
+        tx, ty = x1 + label_off, y1 + label_off
+        ha_l, va_l = "left", "bottom"
+        leader_from = (bx1, by1)
+        text_kw: dict = {}
+    else:
+        # GDS frame (QR bottom-left): a caption tag on the inset's top
+        # edge, styled like the pages 2-3 "die QR / 芯片二维码" bar —
+        # white bold text on a solid red box — so the page-1 marker
+        # matches. The leader runs from the highlight box's top-left
+        # corner.
+        tx, ty = x0 - margin + 0.5 * margin, y0 - 0.012 * total_h
+        ha_l, va_l = "center", "bottom"
+        leader_from = (bx0, by1)
+        text_kw = dict(color="white", fontsize=13,
+                       bbox=dict(facecolor=ID_QR_COLOR, edgecolor="none",
+                                 pad=2.5))
+    ax.plot(
+        [leader_from[0], tx], [leader_from[1], ty],
+        color=hl_edge, linewidth=1.0, alpha=0.8, zorder=7.1,
+    )
+    ax.text(tx, ty, "ID QR",
+            color=text_kw.pop("color", WSIP_QR_COLOR),
+            fontsize=text_kw.pop("fontsize", 10),
+            ha=ha_l, va=va_l, family="monospace", fontweight="bold",
+            zorder=7.2, **text_kw)
 
     # pt-per-µm conversion factors used by both the inside-pad number and
     # the outer label. Computed up front so the rectangle-drawing loop

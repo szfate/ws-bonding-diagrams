@@ -1,0 +1,19 @@
+{
+  "defaults": {
+    "page1_die_rotation_deg": 180,
+    "view_rotation_deg": 0,
+    "die_thickness_um": null,
+    "bond": {
+      "wire_diameter_um": null,
+      "wire_material": null,
+      "process": null
+    }
+  },
+  "runs": {
+    "ws-run2": {
+      "page1_die_rotation_deg": 0,
+      "view_rotation_deg": 180
+    }
+  },
+  "dies": {}
+}

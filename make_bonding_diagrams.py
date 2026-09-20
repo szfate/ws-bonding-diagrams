@@ -9,13 +9,16 @@ number in the footer):
      content bands in the committed 180-dpi PNG, which shares the PDF's
      figure geometry), merged into the template page via pypdf;
   2. die placement — the COB breakout rendered from tmp/cob/<variant>.json
-     with the two-tone die render placed in the cavity, plus the
-     orientation indicator: the die's QR cell highlighted with a
-     magnified inset, the board's rocket logo ringed, and the
-     bilingual (EN/中文) align-QR-to-rocket note. The die render is in
-     display orientation (QR top-right) and the die is placed rotated
-     180° from GDS, so display frame = placement frame (both rotations
-     cancel; see PAD_MAPPING.md in the sibling repo);
+      with the two-tone die render placed in the cavity, plus the
+      orientation indicator: the die's QR cell highlighted with a
+      magnified inset, the board's rocket logo ringed, and the
+      bilingual (EN/中文) align-QR-to-rocket note. The die render and the
+      view orientation are config-driven per run (runs.json): run-1
+      draws the display frame (die render 180° from GDS, QR top-right,
+      die placed 180° from GDS — both rotations cancel), while ws-run2
+      stores GDS-frame data and rotates the drawn view 180° about the
+      padring origin (pin-1 marker bottom-left, die in GDS frame); the
+      rotations still cancel in the drawn result;
   3. bonding — page 2 plus the bond wires, one black wire per pad.
      COB pads are numbered 0-based on the drawing to match the die
      (physical PCB pads are +1).
@@ -34,6 +37,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import shutil
@@ -65,6 +69,7 @@ from make_diagrams import (  # noqa: E402  (vendored, see its module header)
 from plot_pcb import CLASS_COLORS, centered_rect, net_class  # noqa: E402
 from verify_mapping import extra_pads  # noqa: E402
 from boards import find_pads, load_boards  # noqa: E402
+from runs import run_config  # noqa: E402
 
 DEFAULT_COB = REPO / "tmp" / "cob" / "1x1.json"
 OUT_DIR = REPO / "bonding-diagrams"
@@ -217,7 +222,10 @@ def die_pad_mm(pad: dict, die_bb: list[float]) -> tuple[float, float, float, flo
     The die display frame (GDS rotated 180°, QR top-right) maps 1:1
     onto the board frame: the die is placed 180°-rotated relative to
     GDS in the cavity, which cancels the y flip into the y-up plot
-    frame (see PAD_MAPPING.md §4 in the sibling repo).
+    frame (see PAD_MAPPING.md §4 in the sibling repo). GDS-frame data
+    (ws-run2, page1_die_rotation_deg == 0) draws in the same frame
+    because the view is additionally rotated 180° — the two rotations
+    cancel in the drawn result.
     """
     cx0 = 0.5 * (die_bb[0] + die_bb[2])
     cy0 = 0.5 * (die_bb[1] + die_bb[3])
@@ -394,13 +402,16 @@ def to_plot(cob: dict, gx: float, gy: float) -> tuple[float, float]:
 
     The plot frame is pcbnew's front view: file millimetres translated
     to the padring origin, y negated to math-up (small file y = board
-    top = plot top). Everything global — edge cuts, pours, traces,
-    vias, silks, the rocket, and the bond pads' gx/gy — goes through
-    here; the padring footprint's own local shapes go through
-    local_to_plot instead.
+    top = plot top). With cob["view_rot"] (ws-run2), the whole drawn
+    view is rotated 180° about the padring origin — a point reflection,
+    so every line's direction (and thus rectangle angles) is preserved.
+    Everything global — edge cuts, pours, traces, vias, silks, the
+    rocket, and the bond pads' gx/gy — goes through here; the padring
+    footprint's own local shapes go through local_to_plot instead.
     """
     ox, oy = cob["padring"]["at_mm"]
-    return gx - ox, -(gy - oy)
+    x, y = gx - ox, -(gy - oy)
+    return (-x, -y) if cob.get("view_rot") else (x, y)
 
 
 def local_to_plot(cob: dict, lx: float, ly: float) -> tuple[float, float]:
@@ -409,13 +420,14 @@ def local_to_plot(cob: dict, lx: float, ly: float) -> tuple[float, float]:
     Forward placement rotation (same matrix as parse_pcb.py's global
     placement) followed by to_plot — the footprint-local shapes (mask
     opening) sit in the padring's own frame, which is rotated by
-    rot_deg on the board.
+    rot_deg on the board; the optional view reflection applies last.
     """
     ox, oy = cob["padring"]["at_mm"]
     r = math.radians(cob["padring"]["rot_deg"])
     gx = ox + lx * math.cos(r) - ly * math.sin(r)
     gy = oy + lx * math.sin(r) + ly * math.cos(r)
-    return gx - ox, -(gy - oy)
+    x, y = gx - ox, -(gy - oy)
+    return (-x, -y) if cob.get("view_rot") else (x, y)
 
 
 def board_bounds(cob: dict) -> tuple[float, float, float, float]:
@@ -813,14 +825,22 @@ def draw_die(ax: plt.Axes, design: dict, fs: float, show_numbers: bool = True,
                                zorder=4))
 
 
-def die_qr_mm(design: dict) -> tuple[float, float, float]:
+def die_qr_mm(design: dict, gds_frame: bool = False
+              ) -> tuple[float, float, float]:
     """Die QR cell centre + half-size in plot-frame mm.
 
     _wsip_corners returns the QR bbox in the die's display frame (QR
     top-right); the same centring as die_pad_mm maps it to plot mm.
+    When pages 2-3 draw the die in the GDS frame (ws-run2, same
+    orientation as page 1), the QR sits bottom-left: reflect the bbox
+    through the die centre.
     """
     bb = design["die_bb_um"]
     qx0, qy0, qx1, qy1 = _wsip_corners(tuple(bb))[0]
+    if gds_frame:
+        cx2, cy2 = bb[0] + bb[2], bb[1] + bb[3]
+        qx0, qx1 = cx2 - qx1, cx2 - qx0
+        qy0, qy1 = cy2 - qy1, cy2 - qy0
     return ((qx0 + qx1) / 2 - (bb[0] + bb[2]) / 2) / 1000.0, \
            ((qy0 + qy1) / 2 - (bb[1] + bb[3]) / 2) / 1000.0, \
            WSIP_CELL_UM / 2000.0
@@ -890,11 +910,12 @@ def qr_fiducial_target(cob: dict) -> dict | None:
 
 
 def draw_fiducials(ax: plt.Axes, cob: dict, fs: float, y_top: float,
-                   target: dict | None = None) -> None:
+                   y_bot: float, target: dict | None = None) -> None:
     """Placement-page fiducials: ring the board's QR-alignment marker and
-    label it above the board (the die's QR cell gets the circle + zoom
+    label it outside the board (the die's QR cell gets the circle + zoom
     inset of draw_qr_zoom, so the header note reads as QR circle ↔
-    marker ring).
+    marker ring). The label goes above the board top, or below the
+    board bottom when the marker sits in the lower half (rotated views).
     The circle marker sits beside the die QR (and the QR inset), so its
     label anchors right of the leader to stay clear of the inset box.
     """
@@ -902,28 +923,41 @@ def draw_fiducials(ax: plt.Axes, cob: dict, fs: float, y_top: float,
         print("WARN: no board rocket artwork found — fiducial ring skipped")
         return
     cx, cy, rr = target["cx"], target["cy"], target["r"]
-    lab_y = y_top + 1.45
+    below = cy < 0.5 * (y_top + y_bot)
+    if below:
+        lab_y, va = y_bot - 1.45, "top"
+        leader = [cy - rr - 0.06, lab_y + 0.05]
+    else:
+        lab_y, va = y_top + 1.45, "bottom"
+        leader = [cy + rr + 0.06, lab_y - 0.05]
     ax.add_patch(Circle((cx, cy), rr, fill=False, edgecolor=FIDUCIAL_COLOR,
                         lw=1.5 * fs, zorder=8))
-    ax.plot([cx, cx], [cy + rr + 0.06, lab_y - 0.05], color=FIDUCIAL_COLOR,
-            lw=0.7 * fs, zorder=8)
+    ax.plot([cx, cx], leader, color=FIDUCIAL_COLOR, lw=0.7 * fs, zorder=8)
+    if below:
+        # Below the board the label shares the band with the die-QR zoom
+        # inset — anchor it left of the leader line to keep clear.
+        lx, ha_l = cx - 0.12, "right"
+    else:
+        lx = cx + 0.12 if target.get("anchor") == "left" else cx
+        ha_l = target.get("anchor", "center")
     ax.annotate(f"{target['label']} / {target['label_zh']}",
-                (cx + 0.12 if target.get("anchor") == "left" else cx, lab_y),
-                ha=target.get("anchor", "center"), va="bottom",
+                (lx, lab_y), ha=ha_l, va=va,
                 fontsize=6.5 * fs, fontweight="bold", color=FIDUCIAL_COLOR,
                 zorder=8, fontfamily=["DejaVu Sans", *CJK_FAMILIES])
 
 
 def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
-                 img: np.ndarray, y_top: float) -> None:
+                 img: np.ndarray, y_top: float, y_bot: float,
+                 gds_frame: bool = False) -> None:
     """Placement-page QR callout: maroon circle on the die's QR cell, leader
-    up to a magnified inset of that cell in the band above the board —
+    to a magnified inset of that cell in the band outside the board —
     the fiducial the assembler aligns the board rocket to. The inset is
     positioned in figure space (centred on the QR's figure-fraction x),
     so the QR's data position is mapped through the settled
-    equal-aspect transform.
+    equal-aspect transform. With the die drawn GDS-frame (QR
+    bottom-left), the inset hangs below the board instead of above it.
     """
-    qx, qy, qh = die_qr_mm(design)
+    qx, qy, qh = die_qr_mm(design, gds_frame)
     # Circle highlight on the die end of the leader line (the inset box
     # is the other end) — the same simple ring as the board fiducial,
     # no fill, so it stays crisp in print.
@@ -938,10 +972,21 @@ def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
         return (px / (fig.get_figwidth() * fig.dpi),
                 py / (fig.get_figheight() * fig.dpi))
 
-    cx_f, box_top_f = to_fig(qx, qy + qr_r + 0.05)
-    _, board_top_f = to_fig(0.0, y_top)
     inset_h = QR_ZOOM_W_FRAC * A4_W_IN / A4_H_IN  # square on paper
-    y0f = board_top_f + 0.006
+    below = qy < 0  # GDS-frame die: QR bottom-left, inset below the board
+    if below:
+        _, board_f = to_fig(0.0, y_bot)
+        y0f = board_f - 0.006 - inset_h
+        _, lead_end_f = to_fig(qx, qy - qr_r - 0.05)
+        lead_y = (lead_end_f, y0f + inset_h)
+        label_y, label_va = y0f - 0.002, "top"
+    else:
+        _, board_f = to_fig(0.0, y_top)
+        y0f = board_f + 0.006
+        _, lead_end_f = to_fig(qx, qy + qr_r + 0.05)
+        lead_y = (lead_end_f, y0f)
+        label_y, label_va = y0f + inset_h + 0.002, "bottom"
+    cx_f, _ = to_fig(qx, qy)
     axz = fig.add_axes((cx_f - QR_ZOOM_W_FRAC / 2, y0f,
                         QR_ZOOM_W_FRAC, inset_h))
     w_mm = design["die_w_um"] / 1000.0
@@ -959,11 +1004,11 @@ def draw_qr_zoom(fig: plt.Figure, ax: plt.Axes, design: dict, fs: float,
         sp.set_edgecolor(FIDUCIAL_COLOR)
         sp.set_linewidth(1.6 * fs)
 
-    fig.add_artist(Line2D([cx_f, cx_f], [box_top_f, y0f],
+    fig.add_artist(Line2D([cx_f, cx_f], [lead_y[0], lead_y[1]],
                           transform=fig.transFigure, color=FIDUCIAL_COLOR,
                           lw=0.9 * fs, zorder=8))
-    fig.text(cx_f, y0f + inset_h + 0.002, f"{QR_LABEL} / {QR_LABEL_ZH}",
-             ha="center", va="bottom", fontsize=5.5 * fs,
+    fig.text(cx_f, label_y, f"{QR_LABEL} / {QR_LABEL_ZH}",
+             ha="center", va=label_va, fontsize=5.5 * fs,
              fontweight="bold", color="white",
              fontfamily=["DejaVu Sans", *CJK_FAMILIES],
              bbox=dict(facecolor=FIDUCIAL_COLOR, edgecolor="none", pad=1.6))
@@ -1065,7 +1110,10 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     """Page 2 (placement) or page 3 (bonding) on the shared A4 template.
 
     fs scales fonts and line widths so the 8.5×10 in reference layout
-    shrinks proportionally onto A4.
+    shrinks proportionally onto A4. The die data is always the display
+    frame here (GDS-frame designs are converted by render_design), and
+    cob["view_rot"] reflects the whole drawn board 180° about the
+    padring origin (ws-run2: pin-1 bottom-left).
     """
     die_classes = sorted({classify_net(p["net"]) for p in design["pads"]},
                          key=list(DIE_CLASS_LABELS).index)
@@ -1085,9 +1133,15 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
     # must see the limits the page is rendered with.
     x0, y0, x1, y1 = board_bounds(cob)
     ax.set_xlim(x0 - 1.2, x1 + 1.2)
-    ax.set_ylim(y0 - 1.2, y1 + 2.2)
+    if cob.get("view_rot"):
+        ax.set_ylim(y0 - 2.2, y1 + 1.2)  # callouts hang below the board
+    else:
+        ax.set_ylim(y0 - 1.2, y1 + 2.2)
 
     img = mpimg.imread(REPO / design["bg_png"])
+    if design.get("img_rot"):
+        # GDS-frame render: pages 2-3 draw the die display-frame.
+        img = np.rot90(img, 2)
     # Bond labels: ring_map boards get the die pad each COB pad bonds to;
     # the convention boards label physical pad N with die pad N-1.
     ring_map = cob.get("ring_map")
@@ -1137,8 +1191,9 @@ def build_page(design: dict, cob: dict, bonding: bool) -> plt.Figure:
                  f"{note} / {note_zh}", ha="center",
                  va="center", fontsize=8.5, fontweight="bold",
                  color=FIDUCIAL_COLOR, fontfamily=["DejaVu Sans", *CJK_FAMILIES])
-        draw_fiducials(ax, cob, fs, y1, target)
-        draw_qr_zoom(fig, ax, design, fs, img, y1)
+        draw_fiducials(ax, cob, fs, y1, y0, target)
+        draw_qr_zoom(fig, ax, design, fs, img, y1, y0,
+                     gds_frame=design.get("draw_gds_frame", False))
         page_num = 2
     add_footer(fig, page_num)
     two_legends(ax, die_classes, pcb_classes, fs)
@@ -1154,8 +1209,50 @@ def out_dirs(design: dict) -> tuple[Path, Path]:
     return OUT_DIR / reticle, TMP_ROOT / reticle / "pages"
 
 
-def render_design(design: dict, cob: dict) -> Path:
+def to_display_frame(design: dict) -> dict:
+    """180°-rotate a GDS-frame design dict into the display frame.
+
+    Pages 2-3 always draw the die display-frame: with the board view
+    also rotated 180° (view_rot), the drawn page is a rigid 180° view
+    of the physically placed board. Coordinates, x/y extents, and the
+    edge classification all rotate; pad numbers and nets are
+    frame-independent.
+    """
+    bb = design["die_bb_um"]
+    cx2, cy2 = bb[0] + bb[2], bb[1] + bb[3]
+    d = copy.deepcopy(design)
+    for p in d["pads"]:
+        for k in ("x0_um", "x1_um", "cx_um"):
+            p[k] = cx2 - p[k]
+        for k in ("y0_um", "y1_um", "cy_um"):
+            p[k] = cy2 - p[k]
+        p["edge"] = {"T": "B", "B": "T", "L": "R", "R": "L"}.get(
+            p.get("edge"), p.get("edge"))
+    d["img_rot"] = True  # bg_png stays GDS-frame: flip it at draw time
+    return d
+
+
+def render_design(design: dict, cob: dict, cfg: dict) -> Path:
     """Write bonding-diagrams/<reticle>/<name>_<slot>.pdf (3 pages) + PNG previews."""
+    cob["view_rot"] = cfg["view_rotation_deg"] == 180
+    # The die's drawn orientation is placement ⊕ view. When that lands
+    # 180° away from the stored (page-1) frame, pages 2-3 need the
+    # display-frame conversion; equal frames draw the stored data as-is.
+    drawn = (cob.get("die_placement_rotation_deg", 180)
+             + cfg["view_rotation_deg"]) % 360
+    page1 = cfg["page1_die_rotation_deg"] % 360
+    if drawn == 180 and page1 != 180:
+        design = to_display_frame(design)
+    elif drawn != page1:
+        raise SystemExit(
+            f"{design['name']}: unsupported orientation combination "
+            f"(placement {cob.get('die_placement_rotation_deg')}° + view "
+            f"{cfg['view_rotation_deg']}° vs page-1 frame "
+            f"{cfg['page1_die_rotation_deg']}°)")
+    elif drawn == 0:
+        # Pages 2-3 draw the die exactly as page 1 (GDS frame): the QR
+        # callout must target the bottom-left corner, not top-right.
+        design["draw_gds_frame"] = True
     out_dir, page_dir = out_dirs(design)
     out_dir.mkdir(parents=True, exist_ok=True)
     page_dir.mkdir(parents=True, exist_ok=True)
@@ -1188,27 +1285,61 @@ def render_design(design: dict, cob: dict) -> Path:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--designs", nargs="*", default=DEFAULT_DESIGNS,
-                    help="design cell names (default: WSLG)")
+    ap.add_argument("--designs", nargs="*", default=None,
+                    help="design cell names (default: WSLG; with --smoke, "
+                         "one of each slot size per reticle)")
     ap.add_argument("--board", help="board id in boards.json — shorthand "
                                     "for --cob tmp/cob/<board>.json")
     ap.add_argument("--pads", type=Path, default=None,
                     help="pads.json (default: the single tmp/<reticle>/"
                          "pads.json; required when several exist)")
-    ap.add_argument("--cob", type=Path, default=DEFAULT_COB)
+    ap.add_argument("--cob", type=Path, default=None,
+                    help="COB JSON (default: tmp/cob/<board>.json for "
+                         "--board, 1x1 otherwise)")
+    ap.add_argument("--smoke", action="store_true",
+                    help="render one die of each slot size per reticle on "
+                         "every board instead of the full batch — fast "
+                         "end-to-end check")
     args = ap.parse_args()
 
     if args.board:
         args.cob = REPO / "tmp" / "cob" / f"{args.board}.json"
-    cob = json.loads(args.cob.read_text())
-    pads_path = find_pads(args.pads)
+    pads_path = find_pads(args.pads or (
+        max((REPO / "tmp").glob("*/pads.json"),
+            key=lambda p: p.stat().st_mtime)
+        if args.smoke and args.pads is None else None))
     designs = json.loads(pads_path.read_text())
+    if args.designs is None:
+        args.designs = [] if args.smoke else DEFAULT_DESIGNS
     if args.designs:
         designs = [d for d in designs if d["name"] in args.designs]
+    elif args.smoke:
+        picked: set[tuple[str, str]] = set()
+        smoke: list[dict] = []
+        for d in designs:
+            key = (d.get("reticle", "ws-run1"), d["slot_size"])
+            if key not in picked:
+                picked.add(key)
+                smoke.append(d)
+        designs = smoke
+        print(f"smoke test: {[d['name'] for d in designs]}")
     if not designs:
         raise SystemExit(f"no matching designs in {pads_path} "
                          "— run extract_dies.py first")
 
+    cob_paths = [args.cob or DEFAULT_COB]
+    if args.smoke and not (args.board or args.cob):
+        cob_paths = [REPO / "tmp" / "cob" / f"{bid}.json"
+                     for bid in load_boards()]
+    written = 0
+    for cob_path in cob_paths:
+        cob = json.loads(cob_path.read_text())
+        written += run_board(cob, designs)
+    print(f"{written} PDF(s) written")
+
+
+def run_board(cob: dict, designs: list[dict]) -> int:
+    """Render the designs that belong on this board; returns the count."""
     ring = [p for p in cob["pads"] if p["num"] not in board_extras(cob)]
     # Die must physically fit the board's die site: parse stamps the
     # asserted boards.json site; fall back to the smallest F.Mask opening
@@ -1232,6 +1363,7 @@ def main() -> None:
     # boards (MOSB's 74-pad die fits the 1x1 site too).
     boards_kb = load_boards()
     this_board = cob.get("board")
+    written = 0
     for design in designs:
         claims = [bid for bid, e in boards_kb.items()
                   if design["name"] in e.get("designs", ())]
@@ -1260,8 +1392,11 @@ def main() -> None:
                   f"{dw:.2f}×{dh:.2f} mm does not fit die site "
                   f"{cavity[0]:.2f}×{cavity[1]:.2f} mm — wrong board")
             continue
-        out = render_design(design, cob)
+        out = render_design(design, cob, run_config(
+            design.get("reticle", "ws-run1"), design["name"]))
         print(f"wrote {out}")
+        written += 1
+    return written
 
 
 if __name__ == "__main__":
