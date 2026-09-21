@@ -23,7 +23,7 @@ Boards pinned at chip-on-board-wire-bonded-pcbs `90fc89d`.
 | TQVC_chip_top_12_8 | 1x0.5 | 3932×2531 | 72 | 72 | TQVC_chip_top_12_8_1x0.5.pdf |
 | TQVC_chip_top_8_8 | 1x0.5 | 3932×2531 | 72 | 72 | TQVC_chip_top_8_8_1x0.5.pdf |
 
-## Board `1x1` (20 designs)
+## Board `1x1` (21 designs)
 
 | design | slot | die (µm) | pads | labelled | PDF |
 |---|---|---|---|---|---|
@@ -42,6 +42,7 @@ Boards pinned at chip-on-board-wire-bonded-pcbs `90fc89d`.
 | RBOY_chip_top_12_6 | 1x1 | 3932×5122 | 74 | 74 | RBOY_chip_top_12_6_1x1.pdf |
 | RZ80_chip_top_0_2 | 1x1 | 3932×5122 | 74 | 74 | RZ80_chip_top_0_2_1x1.pdf |
 | RZ80_chip_top_2_2 | 1x1 | 3932×5122 | 74 | 74 | RZ80_chip_top_2_2_1x1.pdf |
+| RZML_chip_top_12_2 | 1x1 | 3932×5122 | 74 | 74 | RZML_chip_top_12_2_1x1.pdf |
 | TTP2_tt_gf_wrapper_6_4 | 1x1 | 3932×5122 | 74 | 74 | TTP2_tt_gf_wrapper_6_4_1x1.pdf |
 | TTPG_tt_gf_wrapper_6_2 | 1x1 | 3932×5122 | 74 | 74 | TTPG_tt_gf_wrapper_6_2_1x1.pdf |
 | TZ01_chip_top_0_4 | 1x1 | 3932×5122 | 74 | 74 | TZ01_chip_top_0_4_1x1.pdf |

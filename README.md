@@ -75,6 +75,7 @@ Four stages, each with a file intermediate so they re-run independently:
 | `verify_mapping.py` | `tmp/<reticle>/pads.json` + `tmp/cob/<id>.json` | geometry check only (fails loudly) |
 | `make_bonding_diagrams.py --board <id>` | the above | `bonding-diagrams/<reticle>/<name>_<slot>.pdf` (+ page previews in `tmp/<reticle>/pages/`) |
 | `make_index.py` | the above | `bonding-diagrams/<reticle>/index.md` |
+| `export_die_maps.py` | `tmp/<reticle>/pads.json` + `<reticle>/layout/reticle.oas` (KLayout render at 2048 px) | `tmp/<reticle>/die_exports/<code>.png` + `<code>.json` (4-char project code; one per design, deduped across slots) for the test-result viewer |
 
 `boards.json` is the knowledgebase of per-board facts that can't be
 derived each run: git URL + pinned rev, PCB path, slot/die designs
@@ -156,6 +157,16 @@ uv run make_bonding_diagrams.py --board tqva --designs TQVA_chip_top_14_8
 
 # 5. Regenerate the index table.
 uv run make_index.py
+
+# 6. Optional: die exports for the die-test result viewer (separate repo,
+#    which consumes these files). Per design: a 2048 px die render PNG and
+#    a pad-map JSON (pad centers/boxes in both µm — the pads.json die
+#    frame — and px in image space, origin top-left, plus image
+#    dimensions and px-per-µm). Named by the 4-char project code; a
+#    design in several slots is exported once. Reads
+#    tmp/<reticle>/pads.json; run extract_dies.py first. Run once per
+#    wafer run; copy the die_exports/ folder to the results repo manually.
+uv run export_die_maps.py --all
 ```
 
 Designs whose pad count matches no board are custom one-off pad rings
